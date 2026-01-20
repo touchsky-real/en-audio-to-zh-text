@@ -41,13 +41,13 @@
     找到 **[Step 2]** 代码块，修改以下关键信息：
 
     ```python
-    # 1. 填入 Drive 里真实的文件名
-    AUDIO_FILENAME = "My_Podcast_Episode.mp3"
+    # 1. 原始文件名 (填入 Drive 里真实的文件名，包含空格/问号都没关系)
+    AUDIO_FILENAME = "example.mp3"
 
-    # 2. 填写翻译 API 信息 (支持 OpenAI 格式)
-    API_KEY = "sk-xxxxxxxxxxxxxxxx"      # 您的 API Key
-    BASE_URL = "[https://api.openai.com/v1](https://api.openai.com/v1)" # 或第三方转发地址
-    MODEL_NAME = "gpt-4o-mini"           # 模型名称
+    # 3. API 设置 (请修改)
+    API_KEY = "******************"
+    BASE_URL = "https://**********************/v1"
+    MODEL_NAME = "gpt-4.1-mini"
     ```
 
 4.  **运行脚本**：
