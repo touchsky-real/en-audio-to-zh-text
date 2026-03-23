@@ -1,6 +1,6 @@
 # 🎙️ Audio2LRC: 英文播客/音频自动转中文字幕
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1aXjREXsk4NfhsIftpBXBs8hmUfhI2zpq?usp=sharing)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1U9Mk01e_Bl6CatEAufo0DunxCIsDFB0W?usp=sharing)
 
 > "我想听英文播客的时候发现，这些播客都没有中文字幕，于是就有了这个项目。"
 
