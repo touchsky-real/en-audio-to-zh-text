@@ -1,0 +1,4 @@
+# Lightweight checks; no Whisper, PyTorch or GPU required.
+requests==2.34.2
+ruff>=0.11,<1
+nbformat>=5.10,<6
