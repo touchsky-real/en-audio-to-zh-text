@@ -9,10 +9,8 @@ from textwrap import dedent
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def code_cell(cell_id, source, *, hidden=False):
+def code_cell(cell_id, source):
     metadata = {"id": cell_id}
-    if hidden:
-        metadata["cellView"] = "form"
     return {
         "cell_type": "code",
         "id": cell_id,
@@ -38,6 +36,7 @@ def build_notebook(subtitle_format):
             "source": [
                 f"# 英文音频 → 中英双语 {label}\n",
                 "选择 GPU 运行时，依次执行各步骤，在 Step 2 设置音频文件及翻译接口。\n",
+                "Step 3 必须运行；看到“字幕处理函数已加载”后再运行 Step 4。重启运行时后请从 Step 1 重新执行。\n",
                 "输出保存在音频所在目录，保留原音频文件名。API Key 可在运行时隐藏输入。\n",
                 "关闭中文输出即可跳过 API。自动断开默认关闭，出错或翻译不全时保留运行时。\n",
                 "维护说明：此文件由 `scripts/build_notebooks.py` 生成。\n",
@@ -97,7 +96,14 @@ def build_notebook(subtitle_format):
         )
     )
     core = (ROOT / "audio2text.py").read_text(encoding="utf-8")
-    cells.append(code_cell("helpers", "#@title [Step 3] 加载字幕处理函数（直接运行）\n" + core, hidden=True))
+    cells.append(
+        code_cell(
+            "helpers",
+            "# [Step 3] 加载字幕处理函数（必须运行，无需修改）\n"
+            + core
+            + '\nprint("字幕处理函数已加载，请继续运行 Step 4。")\n',
+        )
+    )
     cells.append(
         code_cell(
             "transcribe",
@@ -108,6 +114,19 @@ def build_notebook(subtitle_format):
         segments = None
         source_path = None
         translation_config = None
+        if not all(callable(globals().get(name)) for name in (
+            "resolve_audio_path", "transcribe_audio", "TranslationConfig", "export_subtitles",
+        )):
+            raise RuntimeError(
+                "字幕处理函数尚未加载。请先运行 Step 3，看到“字幕处理函数已加载”后再运行 Step 4。"
+                "如果 Step 3 报错，请先处理该错误；重启运行时后需从 Step 1 重新执行。"
+            )
+        missing_config = [name for name in (
+            "DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "OUTPUT_CHINESE",
+            "API_KEY", "BASE_URL", "MODEL_NAME", "MAX_WORKERS", "MAX_RETRIES", "REQUEST_TIMEOUT",
+        ) if name not in globals()]
+        if missing_config:
+            raise RuntimeError(f"配置尚未加载，请先运行 Step 2。缺少配置：{', '.join(missing_config)}")
         candidate_path = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
         if OUTPUT_CHINESE:
             translation_config = TranslationConfig(
@@ -131,8 +150,16 @@ def build_notebook(subtitle_format):
         # [Step 5] 并发翻译并保存 {label}；可单独重跑本步骤，无需再次转录
         import time
 
-        if segments is None or source_path is None:
+        if globals().get("segments") is None or globals().get("source_path") is None:
             raise RuntimeError("请先成功运行 Step 4，再生成字幕。")
+        if not all(callable(globals().get(name)) for name in ("TranslationConfig", "export_subtitles")):
+            raise RuntimeError("字幕处理函数尚未加载，请先运行 Step 3。")
+        missing_config = [name for name in (
+            "OUTPUT_CHINESE", "AUTO_DISCONNECT", "API_KEY", "BASE_URL", "MODEL_NAME",
+            "MAX_WORKERS", "MAX_RETRIES", "REQUEST_TIMEOUT",
+        ) if name not in globals()]
+        if missing_config:
+            raise RuntimeError(f"配置尚未加载，请先运行 Step 2。缺少配置：{{', '.join(missing_config)}}")
 
         # 支持重跑本步骤时修改 API 配置或关闭中文输出。
         translation_config = None

@@ -364,6 +364,41 @@ class NotebookTests(unittest.TestCase):
                     compile("".join(cell["source"]), str(path) + ":" + cell["id"], "exec")
                     self.assertEqual(cell["outputs"], [])
                     self.assertIsNone(cell["execution_count"])
+                    if cell["id"] == "helpers":
+                        self.assertNotEqual(cell["metadata"].get("cellView"), "form")
+
+    def test_skipped_or_incomplete_helpers_explain_how_to_recover(self):
+        for subtitle_format in ["lrc", "srt"]:
+            notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
+            cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
+            for partial_helpers in [{}, {"resolve_audio_path": app.resolve_audio_path}]:
+                with self.subTest(format=subtitle_format, partial=bool(partial_helpers)):
+                    namespace = dict(partial_helpers)
+                    with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            exec(cells["config"], namespace)
+                    with patch.object(subprocess, "run") as run:
+                        with self.assertRaisesRegex(RuntimeError, "请先运行 Step 3"):
+                            exec(cells["transcribe"], namespace)
+                        run.assert_not_called()
+
+    def test_missing_configuration_explains_how_to_recover(self):
+        for subtitle_format in ["lrc", "srt"]:
+            notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
+            cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
+            for step in ["transcribe", "export"]:
+                with self.subTest(format=subtitle_format, step=step):
+                    namespace = dict(vars(app), segments=SEGMENTS, source_path=Path("podcast.mp3"))
+                    with self.assertRaisesRegex(RuntimeError, "请先运行 Step 2"):
+                        exec(cells[step], namespace)
+
+    def test_export_after_runtime_restart_explains_how_to_recover(self):
+        for subtitle_format in ["lrc", "srt"]:
+            with self.subTest(format=subtitle_format):
+                notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
+                cell = next(cell for cell in notebook["cells"] if cell["id"] == "export")
+                with self.assertRaisesRegex(RuntimeError, "请先成功运行 Step 4"):
+                    exec("".join(cell["source"]), {})
 
     def test_standalone_notebooks_transcribe_export_and_clear_failed_run(self):
         for subtitle_format in ["lrc", "srt"]:
@@ -375,12 +410,13 @@ class NotebookTests(unittest.TestCase):
                 source.write_bytes(b"audio")
                 with (
                     patch.dict(sys.modules, {module.__name__: module}),
-                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
                 ):
                     namespace = module.__dict__
-                    exec(cells["helpers"], namespace)
                     with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
                         exec(cells["config"], namespace)
+                    exec(cells["helpers"], namespace)
+                    self.assertIn("字幕处理函数已加载", output.getvalue())
                     namespace.update(DRIVE_FOLDER=folder, AUDIO_FILENAME=source.name, OUTPUT_CHINESE=False)
                     with patch.object(subprocess, "run", side_effect=fake_whisper):
                         exec(cells["transcribe"], namespace)
@@ -412,6 +448,13 @@ class NotebookTests(unittest.TestCase):
                     source_path=Path("podcast.mp3"),
                     OUTPUT_CHINESE=False,
                     AUTO_DISCONNECT=True,
+                    TranslationConfig=app.TranslationConfig,
+                    API_KEY="",
+                    BASE_URL="",
+                    MODEL_NAME="",
+                    MAX_WORKERS=1,
+                    MAX_RETRIES=0,
+                    REQUEST_TIMEOUT=30,
                     export_subtitles=export,
                 )
                 with patch.dict(sys.modules, {"google.colab": colab}):
