@@ -597,11 +597,12 @@ class NotebookTests(unittest.TestCase):
                     )
                     session.post.return_value = response(status=401 if outcome == "api_error" else 200)
                     original_replace = Path.replace
+                    # Windows TEMP may use an 8.3 alias such as RUNNER~1, while
+                    # the notebook resolves the source to its full path.
+                    expected_output = audio.with_suffix("." + subtitle_format).resolve()
 
                     def replace(path, target):
-                        if outcome == "save_error" and Path(target) == audio.with_suffix(
-                            "." + subtitle_format
-                        ):
+                        if outcome == "save_error" and Path(target).resolve() == expected_output:
                             raise OSError("save failed")
                         return original_replace(path, target)
 
