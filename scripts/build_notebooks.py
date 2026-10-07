@@ -39,6 +39,7 @@ def build_notebook(subtitle_format):
                 "Step 3 必须运行；看到“字幕处理函数已加载”后再运行 Step 4。重启运行时后请从 Step 1 重新执行。\n",
                 "输出保存在音频所在目录，保留原音频文件名。API Key 可在运行时隐藏输入。\n",
                 "关闭中文输出即可跳过 API。自动断开默认关闭，出错或翻译不全时保留运行时。\n",
+                "默认保留转录和翻译进度；重跑 Step 5 只补未成功的片段，已生成的旧版字幕也会尝试恢复。\n",
                 "维护说明：此文件由 `scripts/build_notebooks.py` 生成。\n",
             ],
         }
@@ -84,6 +85,7 @@ def build_notebook(subtitle_format):
         REQUEST_TIMEOUT = 30
         WHISPER_MODEL = "turbo"
         AUTO_DISCONNECT = False  # 仅在全部成功保存后自动断开
+        SAVE_PROGRESS = True  # 保存并恢复转录和翻译；False：不读写进度文件，每次重新处理
 
         # 清除上次任务状态，防止失败后误用旧结果。
         segments = None
@@ -108,7 +110,7 @@ def build_notebook(subtitle_format):
         code_cell(
             "transcribe",
             """
-        # [Step 4] 将音频复制到独立临时目录，执行英文转录
+        # [Step 4] 恢复已保存的转录，或将音频复制到独立临时目录后转录
         import time
 
         segments = None
@@ -135,9 +137,11 @@ def build_notebook(subtitle_format):
                 timeout=REQUEST_TIMEOUT,
             )
         started = time.monotonic()
-        segments = transcribe_audio(candidate_path, model=WHISPER_MODEL)
+        segments = transcribe_audio(
+            candidate_path, model=WHISPER_MODEL, save_progress=globals().get("SAVE_PROGRESS", True),
+        )
         source_path = candidate_path
-        print(f"转录完成：{len(segments)} 个片段，耗时 {time.monotonic() - started:.1f} 秒。")
+        print(f"转录已就绪：{len(segments)} 个片段，耗时 {time.monotonic() - started:.1f} 秒。")
         if not any(segment["text"] for segment in segments):
             print("未识别到有效文本，请检查音频内容。")
     """,
@@ -147,7 +151,7 @@ def build_notebook(subtitle_format):
         code_cell(
             "export",
             f'''
-        # [Step 5] 并发翻译并保存 {label}；可单独重跑本步骤，无需再次转录
+        # [Step 5] 保留成功的翻译，只补未成功的片段，然后保存 {label}
         import time
 
         if globals().get("segments") is None or globals().get("source_path") is None:
@@ -172,24 +176,33 @@ def build_notebook(subtitle_format):
 
         def show_progress(finished, total):
             if finished % 20 == 0 or finished == total:
-                print(f"翻译进度：{{finished}}/{{total}}")
+                print(f"本轮翻译进度：{{finished}}/{{total}}")
 
         started = time.monotonic()
         output_path, result = export_subtitles(
             source_path, segments, subtitle_format="{subtitle_format}",
             config=translation_config, output_chinese=OUTPUT_CHINESE,
             progress=show_progress,
+            save_progress=globals().get("SAVE_PROGRESS", True),
         )
         print(f"字幕已保存：{{output_path}}")
         print(f"本步骤耗时：{{time.monotonic() - started:.1f}} 秒。")
         if OUTPUT_CHINESE:
+            print(f"复用已有翻译：{{result.reused}} 条，本轮新增：{{len(result.translations) - result.reused}} 条。")
             print(f"翻译覆盖率：{{len(result.translations)}}/{{result.total}}（不计空白片段）")
+            if globals().get("SAVE_PROGRESS", True):
+                print(f"翻译进度已保存：{{source_path.name}}.translations.json")
+            else:
+                print("进度保存已关闭：本次未读取或写入进度文件。")
         else:
             print("已导出英文字幕，未调用翻译 API。")
         if result.failed_indices:
             print(f"仍有 {{len(result.failed_indices)}} 个片段翻译失败，已保留英文。")
             print(f"失败片段索引（从 0 开始）：{{result.failed_indices}}")
-            print("可检查接口后重跑 Step 5；重跑会重新翻译所有非空片段。")
+            if globals().get("SAVE_PROGRESS", True):
+                print("可检查接口后重跑 Step 5；保留已有中文，只补失败片段。")
+            else:
+                print("进度保存已关闭，重跑会重新翻译所有非空片段。")
         elif AUTO_DISCONNECT:
             from google.colab import runtime
             print("字幕已完整保存，5 秒后断开运行时。")

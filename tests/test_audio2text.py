@@ -192,6 +192,7 @@ class FileTests(unittest.TestCase):
         partial = app.TranslationResult({0: "你好"}, [2], 2)
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "podcast.mp3"
+            source.touch()
             with patch.object(app, "translate_segments", return_value=partial):
                 destination, result = app.export_subtitles(source, SEGMENTS)
             self.assertIn("Goodbye.", destination.read_text(encoding="utf-8"))
@@ -200,6 +201,7 @@ class FileTests(unittest.TestCase):
     def test_permanent_api_error_keeps_english_srt_and_old_final(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "podcast.mp3"
+            source.touch()
             destination = source.with_suffix(".srt")
             destination.write_text("old", encoding="utf-8")
             with patch.object(app, "translate_segments", side_effect=app.TranslationAPIError("HTTP 401")):
@@ -415,6 +417,7 @@ class NotebookTests(unittest.TestCase):
                     namespace = module.__dict__
                     with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
                         exec(cells["config"], namespace)
+                    self.assertIs(namespace["SAVE_PROGRESS"], True)
                     exec(cells["helpers"], namespace)
                     self.assertIn("字幕处理函数已加载", output.getvalue())
                     namespace.update(DRIVE_FOLDER=folder, AUDIO_FILENAME=source.name, OUTPUT_CHINESE=False)
@@ -424,6 +427,7 @@ class NotebookTests(unittest.TestCase):
                         exec(cells["export"], namespace)
                         session.assert_not_called()
                     self.assertIn("Hello world.", source.with_suffix("." + subtitle_format).read_text())
+                    namespace["SAVE_PROGRESS"] = False
                     with patch.object(
                         subprocess, "run", side_effect=subprocess.CalledProcessError(1, "whisper")
                     ):

@@ -1,5 +1,6 @@
 # Shared transcription, translation and subtitle helpers for the Colab notebooks.
 
+import hashlib
 import json
 import math
 import shutil
@@ -52,6 +53,7 @@ class TranslationResult:
     translations: dict[int, str]
     failed_indices: list[int]
     total: int
+    reused: int = 0
 
 
 class TranslationAPIError(RuntimeError):
@@ -99,11 +101,33 @@ def validate_segments(data):
     return segments
 
 
-def transcribe_audio(audio_path, model="turbo"):
+def _audio_identity(source):
+    stat = source.stat()
+    return {"name": source.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _read_progress(path):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (ValueError, UnicodeError):
+        raise ValueError(f"进度文件损坏，请备份后删除再重试：{path}") from None
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ValueError(f"进度文件格式不支持，请备份后删除再重试：{path}")
+    return data
+
+
+def transcribe_audio(audio_path, model="turbo", *, save_progress=True):
     """Run Whisper in an isolated directory and only read a successful run's JSON."""
     source = Path(audio_path).resolve(strict=True)
     if not source.is_file():
         raise ValueError(f"不是音频文件：{source}")
+    identity = _audio_identity(source)
+    cache_path = source.with_name(source.name + ".transcript.json")
+    cached = _read_progress(cache_path) if save_progress else None
+    if cached and cached.get("audio") == identity and cached.get("model") == model:
+        return validate_segments(cached)
     with tempfile.TemporaryDirectory(prefix="audio2text-") as folder:
         workdir = Path(folder)
         local_audio = workdir / ("audio" + source.suffix)
@@ -128,7 +152,21 @@ def transcribe_audio(audio_path, model="turbo"):
             check=True,
         )
         with (workdir / "audio.json").open(encoding="utf-8") as stream:
-            return validate_segments(json.load(stream))
+            segments = validate_segments(json.load(stream))
+    if save_progress:
+        write_text_atomic(
+            cache_path,
+            json.dumps(
+                {
+                    "version": 1,
+                    "audio": identity,
+                    "model": model,
+                    "segments": segments,
+                },
+                ensure_ascii=False,
+            ),
+        )
+    return segments
 
 
 def _timestamp_units(seconds, scale):
@@ -231,10 +269,21 @@ def _request_translation(session, text, config):
         return _text(content)
 
 
-def translate_segments(segments, config=None, *, output_chinese=True, progress=None):
-    pending = {i: _text(s["text"]) for i, s in enumerate(segments) if s["text"].strip()}
-    if not output_chinese or not pending:
-        return TranslationResult({}, [], len(pending))
+def translate_segments(
+    segments, config=None, *, output_chinese=True, progress=None, initial_translations=None, on_success=None
+):
+    texts = {i: _text(s["text"]) for i, s in enumerate(segments) if s["text"].strip()}
+    if not output_chinese or not texts:
+        return TranslationResult({}, [], len(texts))
+    translations = {}
+    for i, value in (initial_translations or {}).items():
+        if type(i) is not int or i not in texts or not isinstance(value, str) or not value.strip():
+            raise ValueError("已有翻译包含无效的片段索引或文本。")
+        translations[i] = _text(value)
+    reused = len(translations)
+    pending = {i: text for i, text in texts.items() if i not in translations}
+    if not pending:
+        return TranslationResult(translations, [], len(texts), reused)
     if config is None:
         raise ValueError("启用中文输出时需要 TranslationConfig。")
 
@@ -242,8 +291,9 @@ def translate_segments(segments, config=None, *, output_chinese=True, progress=N
     local = threading.local()
     sessions = []
     session_lock = threading.Lock()
+    result_lock = threading.Lock()
 
-    def translate(text):
+    def translate(index, text):
         if stop.is_set():
             return None
         if not hasattr(local, "session"):
@@ -254,7 +304,7 @@ def translate_segments(segments, config=None, *, output_chinese=True, progress=N
             if stop.is_set():
                 return None
             try:
-                return _request_translation(local.session, text, config)
+                result = _request_translation(local.session, text, config)
             except TranslationAPIError:
                 stop.set()
                 raise
@@ -267,16 +317,25 @@ def translate_segments(segments, config=None, *, output_chinese=True, progress=N
                 )
                 if stop.wait(delay):
                     return None
+                continue
+            # Persist in the worker so successful in-flight requests also survive
+            # a failure or interruption in the thread collecting results.
+            with result_lock:
+                translations[index] = result
+                if on_success:
+                    try:
+                        on_success(index, result)
+                    except BaseException:
+                        stop.set()
+                        raise
+            return result
 
-    translations = {}
     try:
         with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-            futures = {executor.submit(translate, text): i for i, text in pending.items()}
+            futures = {executor.submit(translate, i, text): i for i, text in pending.items()}
             try:
                 for finished, future in enumerate(as_completed(futures), 1):
-                    result = future.result()
-                    if result:
-                        translations[futures[future]] = result
+                    future.result()
                     if progress:
                         progress(finished, len(pending))
             except BaseException:
@@ -289,7 +348,7 @@ def translate_segments(segments, config=None, *, output_chinese=True, progress=N
             session.close()
 
     failed = [i for i in pending if i not in translations]
-    return TranslationResult(translations, failed, len(pending))
+    return TranslationResult(translations, failed, len(texts), reused)
 
 
 def write_text_atomic(path, content):
@@ -314,8 +373,82 @@ def write_text_atomic(path, content):
             temporary.unlink(missing_ok=True)
 
 
+def _import_existing_translations(path, segments, subtitle_format):
+    """Migrate old exports only when every English cue and timestamp matches."""
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return {}
+    cues = [(i, s) for i, s in enumerate(segments) if s["text"]]
+    translations = {}
+    if subtitle_format == "srt":
+        blocks = [block for block in content.strip().split("\n\n") if block.strip()]
+        if len(blocks) != len(cues):
+            return {}
+        for number, ((i, segment), block) in enumerate(zip(cues, blocks), 1):
+            lines = block.splitlines()
+            timing = f"{seconds_to_srt(segment['start'])} --> {seconds_to_srt(segment['end'])}"
+            if len(lines) not in (3, 4) or lines[:3] != [str(number), timing, segment["text"]]:
+                return {}
+            if len(lines) == 4 and lines[3].strip():
+                translations[i] = _text(lines[3])
+    else:
+        lines = [
+            line for line in content.splitlines() if line.strip() and not line.startswith(("[ti:", "[ar:"))
+        ]
+        expected = [seconds_to_lrc(s["start"]) + s["text"] for _, s in cues]
+        cursor = 0
+        for position, (i, segment) in enumerate(cues):
+            if cursor >= len(lines) or lines[cursor] != expected[position]:
+                return {}
+            cursor += 1
+            timestamp = seconds_to_lrc(segment["start"])
+            next_english = expected[position + 1] if position + 1 < len(expected) else None
+            if cursor < len(lines) and lines[cursor].startswith(timestamp) and lines[cursor] != next_english:
+                chinese = _text(lines[cursor][len(timestamp) :])
+                if not chinese:
+                    return {}
+                translations[i] = chinese
+                cursor += 1
+        if cursor != len(lines):
+            return {}
+    return translations
+
+
+def _load_translation_progress(path, identity, signature, segments):
+    data = _read_progress(path)
+    if data is None:
+        return None
+    if data.get("audio") != identity or data.get("transcript") != signature:
+        return {}
+    values = data.get("translations")
+    if not isinstance(values, dict):
+        raise ValueError(f"翻译进度无效，请备份后删除再重试：{path}")
+    translations = {}
+    for key, value in values.items():
+        if not key.isdecimal() or str(int(key)) != key:
+            raise ValueError(f"翻译进度中的片段索引无效：{path}")
+        index = int(key)
+        if (
+            index >= len(segments)
+            or not segments[index]["text"]
+            or not isinstance(value, str)
+            or not value.strip()
+        ):
+            raise ValueError(f"翻译进度中的片段或文本无效：{path}")
+        translations[index] = _text(value)
+    return translations
+
+
 def export_subtitles(
-    audio_path, segments, subtitle_format="lrc", config=None, *, output_chinese=True, progress=None
+    audio_path,
+    segments,
+    subtitle_format="lrc",
+    config=None,
+    *,
+    output_chinese=True,
+    progress=None,
+    save_progress=True,
 ):
     """Save subtitles alongside the audio and report untranslated segments."""
     if subtitle_format not in {"lrc", "srt"}:
@@ -327,7 +460,52 @@ def export_subtitles(
         raise ValueError("字幕输出路径不能与音频路径相同。")
     if subtitle_format == "srt":
         write_text_atomic(source.with_name(source.stem + "_en.srt"), build_srt(segments))
-    result = translate_segments(segments, config, output_chinese=output_chinese, progress=progress)
+    saved = {}
+    save_translation = None
+    if output_chinese and save_progress:
+        identity = _audio_identity(source)
+        signature = hashlib.sha256(
+            json.dumps(
+                segments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        cache_path = source.with_name(source.name + ".translations.json")
+        saved = _load_translation_progress(cache_path, identity, signature, segments)
+        if saved is None:
+            saved = _import_existing_translations(destination, segments, subtitle_format)
+
+        def persist_progress():
+            write_text_atomic(
+                cache_path,
+                json.dumps(
+                    {
+                        "version": 1,
+                        "audio": identity,
+                        "transcript": signature,
+                        "translations": {str(i): text for i, text in saved.items()},
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+
+        def save_translation(index, text):
+            saved[index] = text
+            persist_progress()
+
+        # Verify storage is writable before making requests, and persist any
+        # translations recovered from an older LRC/SRT file immediately.
+        persist_progress()
+    result = translate_segments(
+        segments,
+        config,
+        output_chinese=output_chinese,
+        progress=progress,
+        initial_translations=saved,
+        on_success=save_translation,
+    )
     render = build_lrc if subtitle_format == "lrc" else build_srt
     write_text_atomic(destination, render(segments, result.translations))
     return destination, result
