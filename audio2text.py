@@ -49,12 +49,26 @@ class TranslationConfig:
             raise ValueError("retry_delay 必须是有限非负数。")
 
 
+@dataclass(frozen=True)
+class TranslationFailure:
+    reason: str
+    attempts: int
+    status_code: int | None = None
+
+    @property
+    def description(self):
+        if self.status_code is not None:
+            return f"{self.reason}（HTTP {self.status_code}）"
+        return self.reason
+
+
 @dataclass
 class TranslationResult:
     translations: dict[int, str]
     failed_indices: list[int]
     total: int
     reused: int = 0
+    failures: dict[int, TranslationFailure] = field(default_factory=dict)
 
 
 class TranslationAPIError(RuntimeError):
@@ -62,8 +76,27 @@ class TranslationAPIError(RuntimeError):
 
 
 class _RetryableError(Exception):
-    def __init__(self, delay=0):
+    def __init__(self, reason, *, delay=0, status_code=None):
+        super().__init__(reason)
+        self.reason = reason
         self.delay = delay
+        self.status_code = status_code
+
+
+def _translation_failure(error, attempts, config):
+    # Raw exception messages and response bodies may contain credentials or
+    # subtitle text. Keep diagnostics to known categories and HTTP status codes.
+    if isinstance(error, _RetryableError):
+        return TranslationFailure(error.reason, attempts, error.status_code)
+    if isinstance(error, requests.Timeout):
+        reason = f"请求超时（REQUEST_TIMEOUT={config.timeout:g} 秒）"
+    elif isinstance(error, requests.exceptions.SSLError):
+        reason = "TLS/SSL 连接失败，请检查证书或代理"
+    elif isinstance(error, requests.ConnectionError):
+        reason = "网络连接失败，请检查网络、域名或代理"
+    else:
+        reason = f"网络请求异常（{type(error).__name__}）"
+    return TranslationFailure(reason, attempts)
 
 
 def resolve_audio_path(folder, filename):
@@ -298,20 +331,48 @@ def _request_translation(session, text, config):
     ) as response:
         status = response.status_code
         if status in {408, 429} or 500 <= status < 600:
-            raise _RetryableError(_retry_after(response.headers.get("Retry-After")))
+            reason = {
+                408: "服务端请求超时",
+                429: "请求受限：可能限流或配额不足",
+            }.get(status, "服务端错误")
+            raise _RetryableError(
+                reason, delay=_retry_after(response.headers.get("Retry-After")), status_code=status
+            )
         if not 200 <= status < 300:
-            raise TranslationAPIError(f"翻译 API 返回 HTTP {status}，请检查 API Key、地址、模型和配额。")
+            hint = {
+                400: "请求参数不被接口接受，请检查模型和接口兼容性",
+                401: "身份验证失败，请检查 API Key",
+                403: "访问被拒绝，请检查模型权限、账号或服务商访问限制",
+                404: "接口路径或模型不存在，请检查 BASE_URL 和 MODEL_NAME",
+                422: "请求参数无法处理，请检查模型和接口兼容性",
+            }.get(status, "请检查 API Key、地址、模型和配额")
+            raise TranslationAPIError(f"翻译 API 返回 HTTP {status}，{hint}。")
         try:
-            content = response.json()["choices"][0]["message"]["content"]
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("Empty translation")
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise _RetryableError() from None
+            payload = response.json()
+        except ValueError:
+            raise _RetryableError("返回格式异常：响应不是有效 JSON", status_code=status) from None
+        try:
+            content = payload["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError("Translation is not text")
+        except (KeyError, IndexError, TypeError):
+            raise _RetryableError(
+                "返回格式异常：缺少 choices[0].message.content 文本", status_code=status
+            ) from None
+        if not content.strip():
+            raise _RetryableError("返回翻译为空", status_code=status)
         return _text(content)
 
 
 def translate_segments(
-    segments, config=None, *, output_chinese=True, progress=None, initial_translations=None, on_success=None
+    segments,
+    config=None,
+    *,
+    output_chinese=True,
+    progress=None,
+    initial_translations=None,
+    on_success=None,
+    on_failure=None,
 ):
     texts = {i: _text(s["text"]) for i, s in enumerate(segments) if s["text"].strip()}
     if not output_chinese or not texts:
@@ -333,6 +394,7 @@ def translate_segments(
     sessions = []
     session_lock = threading.Lock()
     result_lock = threading.Lock()
+    failures = {}
 
     def translate(index, text):
         if stop.is_set():
@@ -351,7 +413,7 @@ def translate_segments(
                 raise
             except (requests.RequestException, _RetryableError) as error:
                 if attempt == config.max_retries:
-                    return None
+                    return _translation_failure(error, attempt + 1, config)
                 delay = max(
                     min(60, config.retry_delay * 2 ** min(attempt, 10)),
                     getattr(error, "delay", 0),
@@ -373,10 +435,20 @@ def translate_segments(
 
     try:
         with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-            futures = {executor.submit(translate, i, text) for i, text in pending.items()}
+            futures = {executor.submit(translate, i, text): i for i, text in pending.items()}
             try:
-                for finished, future in enumerate(as_completed(futures), 1):
-                    future.result()
+                finished = 0
+                for future in as_completed(futures):
+                    outcome = future.result()
+                    if outcome is None:
+                        # Jobs skipped after a permanent error are not successes.
+                        continue
+                    finished += 1
+                    if isinstance(outcome, TranslationFailure):
+                        index = futures[future]
+                        failures[index] = outcome
+                        if on_failure:
+                            on_failure(index, outcome)
                     if progress:
                         progress(finished, len(pending))
             except BaseException:
@@ -389,7 +461,7 @@ def translate_segments(
             session.close()
 
     failed = [i for i in pending if i not in translations]
-    return TranslationResult(translations, failed, len(texts), reused)
+    return TranslationResult(translations, failed, len(texts), reused, failures)
 
 
 def write_text_atomic(path, content):
@@ -489,6 +561,7 @@ def export_subtitles(
     *,
     output_chinese=True,
     progress=None,
+    on_failure=None,
     save_progress=True,
 ):
     """Save subtitles alongside the audio and report untranslated segments."""
@@ -546,6 +619,7 @@ def export_subtitles(
         progress=progress,
         initial_translations=saved,
         on_success=save_translation,
+        on_failure=on_failure,
     )
     render = build_lrc if subtitle_format == "lrc" else build_srt
     write_text_atomic(destination, render(segments, result.translations))

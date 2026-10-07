@@ -165,15 +165,29 @@ def build_notebook(notebook_name):
                     max_workers=MAX_WORKERS, max_retries=MAX_RETRIES, timeout=REQUEST_TIMEOUT,
                 )
 
+            failure_counts = {}
+
+            def show_failure(index, failure):
+                description = failure.description
+                failure_counts[description] = failure_counts.get(description, 0) + 1
+                print(
+                    f"翻译失败：片段 {index + 1}，已尝试 {failure.attempts} 次；"
+                    f"最后原因：{description}", flush=True,
+                )
+
             def show_progress(finished, total):
                 if finished % 20 == 0 or finished == total:
-                    print(f"本轮翻译进度：{finished}/{total}")
+                    failed = sum(failure_counts.values())
+                    print(
+                        f"本轮已处理：{finished}/{total}（成功 {finished - failed}，失败 {failed}）",
+                        flush=True,
+                    )
 
             started = time.monotonic()
             output_path, result = export_subtitles(
                 source, segments, subtitle_format=OUTPUT_FORMAT,
                 config=translation_config, output_chinese=OUTPUT_CHINESE,
-                progress=show_progress, save_progress=SAVE_PROGRESS,
+                progress=show_progress, on_failure=show_failure, save_progress=SAVE_PROGRESS,
             )
             print(f"字幕已保存：{output_path}，耗时 {time.monotonic() - started:.1f} 秒。")
             if OUTPUT_CHINESE:
@@ -184,8 +198,11 @@ def build_notebook(notebook_name):
                 print("进度保存已关闭，再次运行 Step 4 将重新翻译全部片段。")
             if result.failed_indices:
                 print(f"仍有 {len(result.failed_indices)} 条翻译失败，已保留英文。")
+                print("失败原因汇总（按每条片段最后一次错误统计）：")
+                for description, count in sorted(failure_counts.items()):
+                    print(f"  {description}：{count} 条")
                 if SAVE_PROGRESS:
-                    print("检查接口后重跑 Step 4，即可继续补译。")
+                    print("按上述原因排查后重跑 Step 4，即可继续补译；修改参数后先重跑 Step 1。")
             elif AUTO_DISCONNECT:
                 from google.colab import runtime
                 print("字幕已完整保存，5 秒后断开运行时。")
