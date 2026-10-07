@@ -1,10 +1,9 @@
 # 🎙️ Audio2LRC: 英文播客/音频自动转中文字幕
 
-**LRC 歌词版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb)
-
-**SRT 字幕版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2srt.ipynb)
-
 > "我想听英文播客的时候发现，这些播客都没有中文字幕，于是就有了这个项目。"
+
+**LRC 歌词版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb)  **SRT 字幕版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2srt.ipynb)
+
 
 ## 📖 项目介绍
 

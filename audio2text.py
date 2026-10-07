@@ -111,7 +111,7 @@ def _read_progress(path):
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
-    except (ValueError, UnicodeError):
+    except ValueError:
         raise ValueError(f"进度文件损坏，请备份后删除再重试：{path}") from None
     if not isinstance(data, dict) or data.get("version") != 1:
         raise ValueError(f"进度文件格式不支持，请备份后删除再重试：{path}")
@@ -332,7 +332,7 @@ def translate_segments(
 
     try:
         with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-            futures = {executor.submit(translate, i, text): i for i, text in pending.items()}
+            futures = {executor.submit(translate, i, text) for i, text in pending.items()}
             try:
                 for finished, future in enumerate(as_completed(futures), 1):
                     future.result()

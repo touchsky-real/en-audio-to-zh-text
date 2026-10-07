@@ -1,11 +1,7 @@
-import contextlib
-import io
 import json
 import subprocess
-import sys
 import tempfile
 import threading
-import types
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -13,7 +9,7 @@ from unittest.mock import Mock, patch
 import requests
 
 import audio2text as app
-from test_audio2text import ROOT, SEGMENTS, config, fake_whisper
+from test_audio2text import SEGMENTS, config, fake_whisper, notebook_session, response
 
 
 def translate_partially(session, text, configuration):
@@ -229,40 +225,21 @@ class ProgressTests(unittest.TestCase):
                 self.cache.unlink(missing_ok=True)
                 self.transcript.unlink(missing_ok=True)
                 self.source.with_suffix("." + subtitle_format).unlink(missing_ok=True)
-                notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
-                cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
                 for attempt in [0, 1]:
-                    module = types.ModuleType("notebook_restart")
-                    namespace = module.__dict__
-                    with (
-                        patch.dict(sys.modules, {module.__name__: module}),
-                        contextlib.redirect_stdout(io.StringIO()),
-                    ):
-                        with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
-                            exec(cells["config"], namespace)
-                        namespace.update(
-                            DRIVE_FOLDER=str(self.source.parent),
-                            AUDIO_FILENAME=self.source.name,
-                            MAX_WORKERS=1,
-                            MAX_RETRIES=0,
+                    with notebook_session(subtitle_format, self.source) as (cells, module, _):
+                        session = Mock()
+                        session.post.side_effect = (
+                            [response("你好"), requests.Timeout()] if attempt == 0 else None
                         )
-                        exec(cells["helpers"], namespace)
-                        with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
-                            exec(cells["transcribe"], namespace)
-                        self.assertEqual(run.call_count, 1 if attempt == 0 else 0)
-                        with patch.object(
-                            module,
-                            "_request_translation",
-                            Mock(
-                                side_effect=translate_partially if attempt == 0 else None,
-                                return_value="再见",
-                            ),
+                        session.post.return_value = response("再见")
+                        with (
+                            patch.object(subprocess, "run", side_effect=fake_whisper) as run,
+                            patch.object(requests, "Session", return_value=session),
                         ):
-                            exec(cells["export"], namespace)
-                            self.assertEqual(
-                                namespace["_request_translation"].call_count, 2 if attempt == 0 else 1
-                            )
-                        self.assertEqual(namespace["result"].reused, attempt)
+                            exec(cells["run"], module.__dict__)
+                        self.assertEqual(run.call_count, 1 if attempt == 0 else 0)
+                        self.assertEqual(session.post.call_count, 2 if attempt == 0 else 1)
+                        self.assertEqual(module.result.reused, attempt)
 
 
 if __name__ == "__main__":

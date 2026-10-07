@@ -35,12 +35,9 @@ def build_notebook(subtitle_format):
             "metadata": {"id": "intro"},
             "source": [
                 f"# 英文音频 → 中英双语 {label}\n",
-                "选择 GPU 运行时，依次执行各步骤，在 Step 2 设置音频文件及翻译接口。\n",
-                "Step 3 必须运行；看到“字幕处理函数已加载”后再运行 Step 4。重启运行时后请从 Step 1 重新执行。\n",
-                "输出保存在音频所在目录，保留原音频文件名。API Key 可在运行时隐藏输入。\n",
-                "关闭中文输出即可跳过 API。自动断开默认关闭，出错或翻译不全时保留运行时。\n",
-                "默认保留转录和翻译进度；重跑 Step 5 只补未成功的片段，已生成的旧版字幕也会尝试恢复。\n",
-                "维护说明：此文件由 `scripts/build_notebooks.py` 生成。\n",
+                "选择 GPU 运行时，依次运行：**1. 准备环境 → 2. 配置参数 → 3. 开始处理**。\n",
+                "字幕保存到音频所在目录。默认保存进度，补译时只需重跑 Step 3；重启运行时后依次运行三步。\n",
+                "设置 `OUTPUT_CHINESE = False` 仅输出英文；`SAVE_PROGRESS = False` 关闭进度保存与恢复。\n",
             ],
         }
     ]
@@ -87,10 +84,6 @@ def build_notebook(subtitle_format):
         AUTO_DISCONNECT = False  # 仅在全部成功保存后自动断开
         SAVE_PROGRESS = True  # 保存并恢复转录和翻译；False：不读写进度文件，每次重新处理
 
-        # 清除上次任务状态，防止失败后误用旧结果。
-        segments = None
-        source_path = None
-        translation_config = None
         if OUTPUT_CHINESE and not API_KEY:
             API_KEY = getpass("请输入翻译 API Key（输入不会显示）：")
         print(f"配置完成：{AUDIO_FILENAME}")
@@ -98,117 +91,66 @@ def build_notebook(subtitle_format):
         )
     )
     core = (ROOT / "audio2text.py").read_text(encoding="utf-8")
-    cells.append(
-        code_cell(
-            "helpers",
-            "# [Step 3] 加载字幕处理函数（必须运行，无需修改）\n"
-            + core
-            + '\nprint("字幕处理函数已加载，请继续运行 Step 4。")\n',
-        )
+    pipeline = dedent(
+        f'''
+        def run_task():
+            import time
+
+            required = (
+                "DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "OUTPUT_CHINESE",
+                "API_KEY", "BASE_URL", "MODEL_NAME", "MAX_WORKERS", "MAX_RETRIES",
+                "REQUEST_TIMEOUT", "SAVE_PROGRESS", "AUTO_DISCONNECT",
+            )
+            if any(name not in globals() for name in required):
+                raise RuntimeError("请先运行 Step 2 配置参数；重启运行时后请依次运行三步。")
+            source_path = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
+            translation_config = None
+            if OUTPUT_CHINESE:
+                translation_config = TranslationConfig(
+                    api_key=API_KEY, base_url=BASE_URL, model=MODEL_NAME,
+                    max_workers=MAX_WORKERS, max_retries=MAX_RETRIES, timeout=REQUEST_TIMEOUT,
+                )
+            started = time.monotonic()
+            print("正在准备转录（有匹配的进度时自动恢复）...")
+            segments = transcribe_audio(source_path, model=WHISPER_MODEL, save_progress=SAVE_PROGRESS)
+            print(f"转录已就绪：{{len(segments)}} 个片段。")
+            if not any(segment["text"] for segment in segments):
+                print("未识别到有效文本，请检查音频内容。")
+
+            def show_progress(finished, total):
+                if finished % 20 == 0 or finished == total:
+                    print(f"本轮翻译进度：{{finished}}/{{total}}")
+
+            output_path, result = export_subtitles(
+                source_path, segments, subtitle_format="{subtitle_format}",
+                config=translation_config, output_chinese=OUTPUT_CHINESE,
+                progress=show_progress, save_progress=SAVE_PROGRESS,
+            )
+            print(f"字幕已保存：{{output_path}}，耗时 {{time.monotonic() - started:.1f}} 秒。")
+            if OUTPUT_CHINESE:
+                print(f"翻译覆盖率：{{len(result.translations)}}/{{result.total}}，复用 {{result.reused}} 条。")
+            else:
+                print("已导出英文字幕，未调用翻译 API。")
+            if not SAVE_PROGRESS:
+                print("进度保存已关闭，再次运行将重新处理全部内容。")
+            if result.failed_indices:
+                print(f"仍有 {{len(result.failed_indices)}} 条翻译失败，已保留英文。")
+                if SAVE_PROGRESS:
+                    print("检查接口后重跑 Step 3，即可继续补译。")
+            elif AUTO_DISCONNECT:
+                from google.colab import runtime
+                print("字幕已完整保存，5 秒后断开运行时。")
+                time.sleep(5)
+                runtime.unassign()
+            return output_path, result
+
+        output_path, result = run_task()
+        '''
     )
     cells.append(
         code_cell(
-            "transcribe",
-            """
-        # [Step 4] 恢复已保存的转录，或将音频复制到独立临时目录后转录
-        import time
-
-        segments = None
-        source_path = None
-        translation_config = None
-        if not all(callable(globals().get(name)) for name in (
-            "resolve_audio_path", "transcribe_audio", "TranslationConfig", "export_subtitles",
-        )):
-            raise RuntimeError(
-                "字幕处理函数尚未加载。请先运行 Step 3，看到“字幕处理函数已加载”后再运行 Step 4。"
-                "如果 Step 3 报错，请先处理该错误；重启运行时后需从 Step 1 重新执行。"
-            )
-        missing_config = [name for name in (
-            "DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "OUTPUT_CHINESE",
-            "API_KEY", "BASE_URL", "MODEL_NAME", "MAX_WORKERS", "MAX_RETRIES", "REQUEST_TIMEOUT",
-        ) if name not in globals()]
-        if missing_config:
-            raise RuntimeError(f"配置尚未加载，请先运行 Step 2。缺少配置：{', '.join(missing_config)}")
-        candidate_path = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
-        if OUTPUT_CHINESE:
-            translation_config = TranslationConfig(
-                api_key=API_KEY, base_url=BASE_URL, model=MODEL_NAME,
-                max_workers=MAX_WORKERS, max_retries=MAX_RETRIES,
-                timeout=REQUEST_TIMEOUT,
-            )
-        started = time.monotonic()
-        segments = transcribe_audio(
-            candidate_path, model=WHISPER_MODEL, save_progress=globals().get("SAVE_PROGRESS", True),
-        )
-        source_path = candidate_path
-        print(f"转录已就绪：{len(segments)} 个片段，耗时 {time.monotonic() - started:.1f} 秒。")
-        if not any(segment["text"] for segment in segments):
-            print("未识别到有效文本，请检查音频内容。")
-    """,
-        )
-    )
-    cells.append(
-        code_cell(
-            "export",
-            f'''
-        # [Step 5] 保留成功的翻译，只补未成功的片段，然后保存 {label}
-        import time
-
-        if globals().get("segments") is None or globals().get("source_path") is None:
-            raise RuntimeError("请先成功运行 Step 4，再生成字幕。")
-        if not all(callable(globals().get(name)) for name in ("TranslationConfig", "export_subtitles")):
-            raise RuntimeError("字幕处理函数尚未加载，请先运行 Step 3。")
-        missing_config = [name for name in (
-            "OUTPUT_CHINESE", "AUTO_DISCONNECT", "API_KEY", "BASE_URL", "MODEL_NAME",
-            "MAX_WORKERS", "MAX_RETRIES", "REQUEST_TIMEOUT",
-        ) if name not in globals()]
-        if missing_config:
-            raise RuntimeError(f"配置尚未加载，请先运行 Step 2。缺少配置：{{', '.join(missing_config)}}")
-
-        # 支持重跑本步骤时修改 API 配置或关闭中文输出。
-        translation_config = None
-        if OUTPUT_CHINESE:
-            translation_config = TranslationConfig(
-                api_key=API_KEY, base_url=BASE_URL, model=MODEL_NAME,
-                max_workers=MAX_WORKERS, max_retries=MAX_RETRIES,
-                timeout=REQUEST_TIMEOUT,
-            )
-
-        def show_progress(finished, total):
-            if finished % 20 == 0 or finished == total:
-                print(f"本轮翻译进度：{{finished}}/{{total}}")
-
-        started = time.monotonic()
-        output_path, result = export_subtitles(
-            source_path, segments, subtitle_format="{subtitle_format}",
-            config=translation_config, output_chinese=OUTPUT_CHINESE,
-            progress=show_progress,
-            save_progress=globals().get("SAVE_PROGRESS", True),
-        )
-        print(f"字幕已保存：{{output_path}}")
-        print(f"本步骤耗时：{{time.monotonic() - started:.1f}} 秒。")
-        if OUTPUT_CHINESE:
-            print(f"复用已有翻译：{{result.reused}} 条，本轮新增：{{len(result.translations) - result.reused}} 条。")
-            print(f"翻译覆盖率：{{len(result.translations)}}/{{result.total}}（不计空白片段）")
-            if globals().get("SAVE_PROGRESS", True):
-                print(f"翻译进度已保存：{{source_path.name}}.translations.json")
-            else:
-                print("进度保存已关闭：本次未读取或写入进度文件。")
-        else:
-            print("已导出英文字幕，未调用翻译 API。")
-        if result.failed_indices:
-            print(f"仍有 {{len(result.failed_indices)}} 个片段翻译失败，已保留英文。")
-            print(f"失败片段索引（从 0 开始）：{{result.failed_indices}}")
-            if globals().get("SAVE_PROGRESS", True):
-                print("可检查接口后重跑 Step 5；保留已有中文，只补失败片段。")
-            else:
-                print("进度保存已关闭，重跑会重新翻译所有非空片段。")
-        elif AUTO_DISCONNECT:
-            from google.colab import runtime
-            print("字幕已完整保存，5 秒后断开运行时。")
-            time.sleep(5)
-            runtime.unassign()
-    ''',
+            "run",
+            "# [Step 3] 开始处理 / 继续补译（直接运行，无需修改）\n" + core + pipeline,
         )
     )
     return {

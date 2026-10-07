@@ -354,132 +354,136 @@ class TranslationTests(unittest.TestCase):
         self.assertLess(content.index("你好"), content.index("再见"))
 
 
+@contextlib.contextmanager
+def notebook_session(subtitle_format, audio_path=None, *, configure=True):
+    notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
+    cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
+    module = types.ModuleType("notebook_test")
+    with (
+        patch.dict(sys.modules, {module.__name__: module}),
+        contextlib.redirect_stdout(io.StringIO()) as output,
+    ):
+        if configure:
+            with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
+                exec(cells["config"], module.__dict__)
+        if audio_path is not None:
+            module.__dict__.update(
+                DRIVE_FOLDER=str(audio_path.parent),
+                AUDIO_FILENAME=audio_path.name,
+                MAX_WORKERS=1,
+                MAX_RETRIES=0,
+            )
+        yield cells, module, output
+
+
 class NotebookTests(unittest.TestCase):
-    def test_generated_notebooks_are_current_and_code_compiles(self):
+    def test_generated_notebooks_have_three_steps_and_valid_code(self):
         subprocess.run([sys.executable, str(ROOT / "scripts/build_notebooks.py"), "--check"], check=True)
         for path in ROOT.glob("*.ipynb"):
             notebook = json.loads(path.read_text(encoding="utf-8"))
             nbformat.validate(notebook)
-            self.assertEqual(notebook["nbformat"], 4)
-            for cell in notebook["cells"]:
-                if cell["cell_type"] == "code":
-                    compile("".join(cell["source"]), str(path) + ":" + cell["id"], "exec")
-                    self.assertEqual(cell["outputs"], [])
-                    self.assertIsNone(cell["execution_count"])
-                    if cell["id"] == "helpers":
-                        self.assertNotEqual(cell["metadata"].get("cellView"), "form")
+            code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+            self.assertEqual([cell["id"] for cell in code_cells], ["setup", "config", "run"])
+            for cell in code_cells:
+                compile("".join(cell["source"]), str(path) + ":" + cell["id"], "exec")
+                self.assertEqual(cell["outputs"], [])
+                self.assertIsNone(cell["execution_count"])
 
-    def test_skipped_or_incomplete_helpers_explain_how_to_recover(self):
+    def test_run_without_configuration_explains_how_to_recover(self):
         for subtitle_format in ["lrc", "srt"]:
-            notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
-            cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
-            for partial_helpers in [{}, {"resolve_audio_path": app.resolve_audio_path}]:
-                with self.subTest(format=subtitle_format, partial=bool(partial_helpers)):
-                    namespace = dict(partial_helpers)
-                    with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
-                        with contextlib.redirect_stdout(io.StringIO()):
-                            exec(cells["config"], namespace)
-                    with patch.object(subprocess, "run") as run:
-                        with self.assertRaisesRegex(RuntimeError, "请先运行 Step 3"):
-                            exec(cells["transcribe"], namespace)
-                        run.assert_not_called()
-
-    def test_missing_configuration_explains_how_to_recover(self):
-        for subtitle_format in ["lrc", "srt"]:
-            notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
-            cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
-            for step in ["transcribe", "export"]:
-                with self.subTest(format=subtitle_format, step=step):
-                    namespace = dict(vars(app), segments=SEGMENTS, source_path=Path("podcast.mp3"))
+            with (
+                self.subTest(format=subtitle_format),
+                notebook_session(subtitle_format, configure=False) as (cells, module, _),
+            ):
+                with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
                     with self.assertRaisesRegex(RuntimeError, "请先运行 Step 2"):
-                        exec(cells[step], namespace)
+                        exec(cells["run"], module.__dict__)
+                    run.assert_not_called()
+                    session.assert_not_called()
 
-    def test_export_after_runtime_restart_explains_how_to_recover(self):
-        for subtitle_format in ["lrc", "srt"]:
-            with self.subTest(format=subtitle_format):
-                notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
-                cell = next(cell for cell in notebook["cells"] if cell["id"] == "export")
-                with self.assertRaisesRegex(RuntimeError, "请先成功运行 Step 4"):
-                    exec("".join(cell["source"]), {})
-
-    def test_standalone_notebooks_transcribe_export_and_clear_failed_run(self):
+    def test_run_loads_helpers_and_failed_rerun_preserves_output(self):
         for subtitle_format in ["lrc", "srt"]:
             with self.subTest(format=subtitle_format), tempfile.TemporaryDirectory() as folder:
-                notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
-                cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
-                module = types.ModuleType("notebook_test")
-                source = Path(folder) / "podcast (test).mp3"
-                source.write_bytes(b"audio")
-                with (
-                    patch.dict(sys.modules, {module.__name__: module}),
-                    contextlib.redirect_stdout(io.StringIO()) as output,
-                ):
+                audio = Path(folder) / "podcast (test).mp3"
+                audio.write_bytes(b"audio")
+                with notebook_session(subtitle_format, audio) as (cells, module, _):
                     namespace = module.__dict__
-                    with patch.dict("os.environ", {"TRANSLATION_API_KEY": "test-key"}):
-                        exec(cells["config"], namespace)
                     self.assertIs(namespace["SAVE_PROGRESS"], True)
-                    exec(cells["helpers"], namespace)
-                    self.assertIn("字幕处理函数已加载", output.getvalue())
-                    namespace.update(DRIVE_FOLDER=folder, AUDIO_FILENAME=source.name, OUTPUT_CHINESE=False)
-                    with patch.object(subprocess, "run", side_effect=fake_whisper):
-                        exec(cells["transcribe"], namespace)
-                    with patch.object(requests, "Session") as session:
-                        exec(cells["export"], namespace)
-                        session.assert_not_called()
-                    self.assertIn("Hello world.", source.with_suffix("." + subtitle_format).read_text())
-                    namespace["SAVE_PROGRESS"] = False
+                    namespace["OUTPUT_CHINESE"] = False
+                    with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
+                        with patch.object(requests, "Session") as session:
+                            exec(cells["run"], namespace)
+                            exec(cells["run"], namespace)
+                            session.assert_not_called()
+                        run.assert_called_once()
+                    output_path = audio.with_suffix("." + subtitle_format)
+                    saved = output_path.read_bytes()
+                    self.assertIn(b"Hello world.", saved)
+                    audio.write_bytes(b"changed audio")
                     with patch.object(
                         subprocess, "run", side_effect=subprocess.CalledProcessError(1, "whisper")
                     ):
                         with self.assertRaises(subprocess.CalledProcessError):
-                            exec(cells["transcribe"], namespace)
-                    self.assertIsNone(namespace["segments"])
-                    with self.assertRaises(RuntimeError):
-                        exec(cells["export"], namespace)
+                            exec(cells["run"], namespace)
+                    self.assertEqual(output_path.read_bytes(), saved)
+
+    def test_changed_filename_uses_new_configuration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            first = Path(folder) / "first.mp3"
+            second = Path(folder) / "second.mp3"
+            first.touch()
+            second.touch()
+            with notebook_session("lrc", first) as (cells, module, _):
+                module.OUTPUT_CHINESE = False
+                with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
+                    exec(cells["run"], module.__dict__)
+                    module.AUDIO_FILENAME = second.name
+                    exec(cells["run"], module.__dict__)
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(module.output_path, second.with_suffix(".lrc").resolve())
+                self.assertTrue(first.with_suffix(".lrc").is_file())
 
     def test_auto_disconnect_requires_successful_complete_export(self):
         for subtitle_format in ["lrc", "srt"]:
-            with self.subTest(format=subtitle_format):
-                notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
-                export_cell = next(cell for cell in notebook["cells"] if cell["id"] == "export")
-                code = "".join(export_cell["source"])
-                runtime = Mock()
-                colab = types.ModuleType("google.colab")
-                colab.runtime = runtime
-                export = Mock()
-                namespace = dict(
-                    segments=SEGMENTS,
-                    source_path=Path("podcast.mp3"),
-                    OUTPUT_CHINESE=False,
-                    AUTO_DISCONNECT=True,
-                    TranslationConfig=app.TranslationConfig,
-                    API_KEY="",
-                    BASE_URL="",
-                    MODEL_NAME="",
-                    MAX_WORKERS=1,
-                    MAX_RETRIES=0,
-                    REQUEST_TIMEOUT=30,
-                    export_subtitles=export,
-                )
-                with patch.dict(sys.modules, {"google.colab": colab}):
-                    with patch("time.sleep"), contextlib.redirect_stdout(io.StringIO()):
-                        export.return_value = (
-                            Path("podcast." + subtitle_format),
-                            app.TranslationResult({}, [0], 2),
-                        )
-                        exec(code, namespace)
-                        runtime.unassign.assert_not_called()
-                        export.side_effect = OSError("save failed")
-                        with self.assertRaises(OSError):
-                            exec(code, namespace)
-                        runtime.unassign.assert_not_called()
-                        export.side_effect = None
-                        export.return_value = (
-                            Path("podcast." + subtitle_format),
-                            app.TranslationResult({}, [], 2),
-                        )
-                        exec(code, namespace)
-                        runtime.unassign.assert_called_once()
+            for outcome in ["complete", "partial", "api_error", "save_error"]:
+                with (
+                    self.subTest(format=subtitle_format, outcome=outcome),
+                    tempfile.TemporaryDirectory() as folder,
+                ):
+                    audio = Path(folder) / "podcast.mp3"
+                    audio.touch()
+                    runtime = Mock()
+                    colab = types.ModuleType("google.colab")
+                    colab.runtime = runtime
+                    session = Mock()
+                    session.post.side_effect = (
+                        [response(), requests.Timeout()] if outcome == "partial" else None
+                    )
+                    session.post.return_value = response(status=401 if outcome == "api_error" else 200)
+                    original_replace = Path.replace
+
+                    def replace(path, target):
+                        if outcome == "save_error" and Path(target) == audio.with_suffix(
+                            "." + subtitle_format
+                        ):
+                            raise OSError("save failed")
+                        return original_replace(path, target)
+
+                    with notebook_session(subtitle_format, audio) as (cells, module, _):
+                        module.AUTO_DISCONNECT = True
+                        with (
+                            patch.dict(sys.modules, {"google.colab": colab}),
+                            patch("time.sleep"),
+                            patch.object(subprocess, "run", side_effect=fake_whisper),
+                            patch.object(requests, "Session", return_value=session),
+                            patch.object(Path, "replace", replace),
+                        ):
+                            if outcome in {"api_error", "save_error"}:
+                                with self.assertRaises(RuntimeError if outcome == "api_error" else OSError):
+                                    exec(cells["run"], module.__dict__)
+                            else:
+                                exec(cells["run"], module.__dict__)
+                        self.assertEqual(runtime.unassign.call_count, int(outcome == "complete"))
 
 
 if __name__ == "__main__":
