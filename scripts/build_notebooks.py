@@ -21,8 +21,7 @@ def code_cell(cell_id, source):
     }
 
 
-def build_notebook(subtitle_format):
-    label = subtitle_format.upper()
+def build_notebook(notebook_name):
     dependencies = [
         line
         for line in (ROOT / "requirements.txt").read_text().splitlines()
@@ -34,9 +33,10 @@ def build_notebook(subtitle_format):
             "id": "intro",
             "metadata": {"id": "intro"},
             "source": [
-                f"# 英文音频 → 中英双语 {label}\n",
+                "# 英文音频 → 中英双语字幕（LRC / SRT）\n",
                 "先填写下方必要参数，再依次运行：**1. 配置参数 → 2. 准备环境 → 3. 开始处理**。建议选择 GPU 运行时。\n",
                 "字幕保存到音频所在目录。默认保存进度，补译时只需重跑 Step 3；重启运行时后依次运行三步。\n",
+                '默认生成 LRC 歌词；在 Step 1 设置 `OUTPUT_FORMAT = "srt"` 可生成 SRT 字幕。\n',
                 "设置 `OUTPUT_CHINESE = False` 仅输出英文；`SAVE_PROGRESS = False` 关闭进度保存与恢复。\n",
             ],
         }
@@ -57,6 +57,7 @@ def build_notebook(subtitle_format):
         MODEL_NAME = os.environ.get("TRANSLATION_MODEL", "gpt-4.1-mini")  # 接口支持的翻译模型
 
         # 可选参数：一般保持默认即可
+        OUTPUT_FORMAT = "lrc"  # "lrc"：歌词（默认）；"srt"：字幕
         OUTPUT_CHINESE = True  # False：仅输出英文，不需要翻译接口
         SAVE_PROGRESS = True  # 保存并恢复进度；False：不读写进度文件，每次重新处理
         AUTO_DISCONNECT = False  # True：仅在全部成功保存后自动断开
@@ -95,17 +96,19 @@ def build_notebook(subtitle_format):
     )
     core = (ROOT / "audio2text.py").read_text(encoding="utf-8")
     pipeline = dedent(
-        f'''
+        """
         def run_task():
             import time
 
             required = (
                 "DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "OUTPUT_CHINESE",
                 "API_KEY", "BASE_URL", "MODEL_NAME", "MAX_WORKERS", "MAX_RETRIES",
-                "REQUEST_TIMEOUT", "SAVE_PROGRESS", "AUTO_DISCONNECT",
+                "REQUEST_TIMEOUT", "SAVE_PROGRESS", "AUTO_DISCONNECT", "OUTPUT_FORMAT",
             )
             if any(name not in globals() for name in required):
                 raise RuntimeError("请先运行 Step 1 配置参数；重启运行时后请依次运行三步。")
+            if OUTPUT_FORMAT not in ("lrc", "srt"):
+                raise ValueError('OUTPUT_FORMAT 只能填写 "lrc" 或 "srt"。请修改 Step 1 后重新运行。')
             source_path = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
             translation_config = None
             if OUTPUT_CHINESE:
@@ -116,28 +119,28 @@ def build_notebook(subtitle_format):
             started = time.monotonic()
             print("正在准备转录（有匹配的进度时自动恢复）...")
             segments = transcribe_audio(source_path, model=WHISPER_MODEL, save_progress=SAVE_PROGRESS)
-            print(f"转录已就绪：{{len(segments)}} 个片段。")
+            print(f"转录已就绪：{len(segments)} 个片段。")
             if not any(segment["text"] for segment in segments):
                 print("未识别到有效文本，请检查音频内容。")
 
             def show_progress(finished, total):
                 if finished % 20 == 0 or finished == total:
-                    print(f"本轮翻译进度：{{finished}}/{{total}}")
+                    print(f"本轮翻译进度：{finished}/{total}")
 
             output_path, result = export_subtitles(
-                source_path, segments, subtitle_format="{subtitle_format}",
+                source_path, segments, subtitle_format=OUTPUT_FORMAT,
                 config=translation_config, output_chinese=OUTPUT_CHINESE,
                 progress=show_progress, save_progress=SAVE_PROGRESS,
             )
-            print(f"字幕已保存：{{output_path}}，耗时 {{time.monotonic() - started:.1f}} 秒。")
+            print(f"字幕已保存：{output_path}，耗时 {time.monotonic() - started:.1f} 秒。")
             if OUTPUT_CHINESE:
-                print(f"翻译覆盖率：{{len(result.translations)}}/{{result.total}}，复用 {{result.reused}} 条。")
+                print(f"翻译覆盖率：{len(result.translations)}/{result.total}，复用 {result.reused} 条。")
             else:
                 print("已导出英文字幕，未调用翻译 API。")
             if not SAVE_PROGRESS:
                 print("进度保存已关闭，再次运行将重新处理全部内容。")
             if result.failed_indices:
-                print(f"仍有 {{len(result.failed_indices)}} 条翻译失败，已保留英文。")
+                print(f"仍有 {len(result.failed_indices)} 条翻译失败，已保留英文。")
                 if SAVE_PROGRESS:
                     print("检查接口后重跑 Step 3，即可继续补译。")
             elif AUTO_DISCONNECT:
@@ -148,7 +151,7 @@ def build_notebook(subtitle_format):
             return output_path, result
 
         output_path, result = run_task()
-        '''
+        """
     )
     cells.append(
         code_cell(
@@ -160,7 +163,7 @@ def build_notebook(subtitle_format):
         "cells": cells,
         "metadata": {
             "accelerator": "GPU",
-            "colab": {"name": f"audio2{subtitle_format}.ipynb", "gpuType": "T4", "provenance": []},
+            "colab": {"name": notebook_name, "gpuType": "T4", "provenance": []},
             "kernelspec": {"display_name": "Python 3", "name": "python3"},
             "language_info": {"name": "python"},
         },
@@ -174,9 +177,9 @@ def main():
     parser.add_argument("--check", action="store_true", help="Check without writing files")
     args = parser.parse_args()
     outdated = []
-    for subtitle_format in ("lrc", "srt"):
-        path = ROOT / f"audio2{subtitle_format}.ipynb"
-        content = json.dumps(build_notebook(subtitle_format), ensure_ascii=False, indent=2) + "\n"
+    for notebook_name in ("audio2lrc.ipynb", "audio2srt.ipynb"):
+        path = ROOT / notebook_name
+        content = json.dumps(build_notebook(notebook_name), ensure_ascii=False, indent=2) + "\n"
         if args.check:
             if not path.exists() or path.read_text(encoding="utf-8") != content:
                 outdated.append(path.name)

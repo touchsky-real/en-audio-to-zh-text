@@ -2,12 +2,13 @@
 
 > "我想听英文播客的时候发现，这些播客都没有中文字幕，于是就有了这个项目。"
 
-**LRC 歌词版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb) &emsp;&emsp; **SRT 字幕版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2srt.ipynb)
+**LRC / SRT 字幕** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb)
 
+默认输出 LRC；在 Step 1 修改 `OUTPUT_FORMAT` 即可切换为 SRT。
 
 ## 📖 项目介绍
 
-本项目是一个运行在 Google Colab 上的自动化脚本，旨在将英文音频（MP3/WAV等）快速转换为 **中英对照的 LRC 歌词文件**。
+本项目是一个运行在 Google Colab 上的自动化脚本，旨在将英文音频（MP3/WAV等）快速转换为 **中英对照的 LRC 歌词或 SRT 字幕**，默认生成 LRC。
 
 **为什么选择 LRC 格式？**
 对于播客（Podcast）或音频听众来说，LRC 格式比 SRT 更实用。只需将生成的 `.lrc` 文件与音频文件命名一致并放在同一目录下，大多数主流音乐播放器（如 Musicolet, Salt Player等）即可自动识别并滚动显示歌词。
@@ -65,11 +66,21 @@ MODEL_NAME = "gpt-4.1-mini"
 
 ### 可选参数：一般保持默认
 
+输出格式在 Step 1 中配置：
+
+```python
+OUTPUT_FORMAT = "lrc"  # 默认：生成 example.lrc
+# 改为 "srt"：生成 example.srt 和英文版 example_en.srt
+```
+
+格式只接受小写 `"lrc"` 或 `"srt"`。切换后重新运行 Step 1、Step 3；保持 `SAVE_PROGRESS = True` 时，会复用已有转录和成功的翻译。
+
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
+| `OUTPUT_FORMAT` | `"lrc"` | 输出格式；`"lrc"` 生成歌词，`"srt"` 生成字幕。 |
 | `OUTPUT_CHINESE` | `True` | 输出中英双语；`False` 仅输出英文，不调用翻译 API。 |
 | `SAVE_PROGRESS` | `True` | 保存并恢复转录、成功的翻译；`False` 不读写进度文件，每次重新处理，已有进度文件保留。 |
-| `AUTO_DISCONNECT` | `False` | 设为 `True` 后，只有字幕全部成功保存才自动断开 Colab。 |
+| `AUTO_DISCONNECT` | `False` | 设为 `True` 后，转录、翻译及字幕保存全部成功才自动断开 Colab。 |
 | `MAX_WORKERS` | `5` | 翻译并发数；遇到接口限流时可适当调低，例如 `1`。 |
 | `MAX_RETRIES` | `2` | 首次请求失败后的额外重试次数；`0` 表示不重试。 |
 | `REQUEST_TIMEOUT` | `30` | 每次翻译请求的超时秒数。 |

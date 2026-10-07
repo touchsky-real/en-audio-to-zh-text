@@ -227,6 +227,7 @@ class ProgressTests(unittest.TestCase):
                 self.source.with_suffix("." + subtitle_format).unlink(missing_ok=True)
                 for attempt in [0, 1]:
                     with notebook_session(subtitle_format, self.source) as (cells, module, _):
+                        module.OUTPUT_FORMAT = subtitle_format
                         session = Mock()
                         session.post.side_effect = (
                             [response("你好"), requests.Timeout()] if attempt == 0 else None

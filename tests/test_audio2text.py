@@ -409,6 +409,7 @@ class NotebookTests(unittest.TestCase):
                 with notebook_session(subtitle_format, audio) as (cells, module, _):
                     namespace = module.__dict__
                     self.assertIs(namespace["SAVE_PROGRESS"], True)
+                    namespace["OUTPUT_FORMAT"] = subtitle_format
                     namespace["OUTPUT_CHINESE"] = False
                     with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
                         with patch.object(requests, "Session") as session:
@@ -443,6 +444,42 @@ class NotebookTests(unittest.TestCase):
                 self.assertEqual(module.output_path, second.with_suffix(".lrc").resolve())
                 self.assertTrue(first.with_suffix(".lrc").is_file())
 
+    def test_default_lrc_and_switching_format_reuse_saved_progress(self):
+        for entry in ["lrc", "srt"]:
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as folder:
+                audio = Path(folder) / "podcast.mp3"
+                audio.touch()
+                with notebook_session(entry, audio) as (cells, module, _):
+                    self.assertEqual(module.OUTPUT_FORMAT, "lrc")
+                    session = Mock()
+                    session.post.return_value = response()
+                    with (
+                        patch.object(subprocess, "run", side_effect=fake_whisper) as transcribe,
+                        patch.object(requests, "Session", return_value=session) as sessions,
+                    ):
+                        exec(cells["run"], module.__dict__)
+                        self.assertEqual(module.output_path.suffix, ".lrc")
+                        module.OUTPUT_FORMAT = "srt"
+                        exec(cells["run"], module.__dict__)
+                    transcribe.assert_called_once()
+                    sessions.assert_called_once()
+                    self.assertEqual(session.post.call_count, 2)
+                    self.assertEqual(module.result.reused, 2)
+                    self.assertEqual(module.output_path.suffix, ".srt")
+                    for filename in ["podcast.lrc", "podcast.srt", "podcast_en.srt"]:
+                        self.assertTrue((audio.parent / filename).is_file())
+
+    def test_invalid_format_stops_before_transcription_or_translation(self):
+        for entry in ["lrc", "srt"]:
+            for invalid in ["vtt", "SRT", "", None]:
+                with self.subTest(entry=entry, format=invalid), notebook_session(entry) as (cells, module, _):
+                    module.OUTPUT_FORMAT = invalid
+                    with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                        with self.assertRaisesRegex(ValueError, "OUTPUT_FORMAT"):
+                            exec(cells["run"], module.__dict__)
+                        run.assert_not_called()
+                        session.assert_not_called()
+
     def test_auto_disconnect_requires_successful_complete_export(self):
         for subtitle_format in ["lrc", "srt"]:
             for outcome in ["complete", "partial", "api_error", "save_error"]:
@@ -471,6 +508,7 @@ class NotebookTests(unittest.TestCase):
 
                     with notebook_session(subtitle_format, audio) as (cells, module, _):
                         module.AUTO_DISCONNECT = True
+                        module.OUTPUT_FORMAT = subtitle_format
                         with (
                             patch.dict(sys.modules, {"google.colab": colab}),
                             patch("time.sleep"),
