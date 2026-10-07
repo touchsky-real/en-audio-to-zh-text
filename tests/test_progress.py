@@ -237,7 +237,9 @@ class ProgressTests(unittest.TestCase):
                             patch.object(subprocess, "run", side_effect=fake_whisper) as run,
                             patch.object(requests, "Session", return_value=session),
                         ):
-                            exec(cells["run"], module.__dict__)
+                            if attempt == 0:
+                                exec(cells["transcribe"], module.__dict__)
+                            exec(cells["translate"], module.__dict__)
                         self.assertEqual(run.call_count, 1 if attempt == 0 else 0)
                         self.assertEqual(session.post.call_count, 2 if attempt == 0 else 1)
                         self.assertEqual(module.result.reused, attempt)

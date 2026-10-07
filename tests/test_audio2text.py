@@ -355,7 +355,7 @@ class TranslationTests(unittest.TestCase):
 
 
 @contextlib.contextmanager
-def notebook_session(subtitle_format, audio_path=None, *, configure=True):
+def notebook_session(subtitle_format, audio_path=None, *, configure=True, prepare=True):
     notebook = json.loads((ROOT / f"audio2{subtitle_format}.ipynb").read_text(encoding="utf-8"))
     cells = {cell["id"]: "".join(cell["source"]) for cell in notebook["cells"]}
     module = types.ModuleType("notebook_test")
@@ -373,17 +373,28 @@ def notebook_session(subtitle_format, audio_path=None, *, configure=True):
                 MAX_WORKERS=1,
                 MAX_RETRIES=0,
             )
+        if prepare:
+            colab = types.ModuleType("google.colab")
+            colab.drive = Mock()
+            with (
+                patch.dict(sys.modules, {"google.colab": colab}),
+                patch.object(subprocess, "run"),
+                patch("shutil.which", return_value="ffmpeg"),
+            ):
+                exec(cells["setup"], module.__dict__)
         yield cells, module, output
 
 
 class NotebookTests(unittest.TestCase):
-    def test_generated_notebooks_have_three_steps_and_valid_code(self):
+    def test_generated_notebooks_have_four_steps_and_valid_code(self):
         subprocess.run([sys.executable, str(ROOT / "scripts/build_notebooks.py"), "--check"], check=True)
         for path in ROOT.glob("*.ipynb"):
             notebook = json.loads(path.read_text(encoding="utf-8"))
             nbformat.validate(notebook)
             code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
-            self.assertEqual([cell["id"] for cell in code_cells], ["config", "setup", "run"])
+            self.assertEqual(
+                [cell["id"] for cell in code_cells], ["config", "setup", "transcribe", "translate"]
+            )
             for cell in code_cells:
                 compile("".join(cell["source"]), str(path) + ":" + cell["id"], "exec")
                 self.assertEqual(cell["outputs"], [])
@@ -396,8 +407,67 @@ class NotebookTests(unittest.TestCase):
                 notebook_session(subtitle_format, configure=False) as (cells, module, _),
             ):
                 with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
-                    with self.assertRaisesRegex(RuntimeError, "请先运行 Step 1"):
-                        exec(cells["run"], module.__dict__)
+                    for step in ["transcribe", "translate"]:
+                        with self.assertRaisesRegex(RuntimeError, "请先运行 Step 1"):
+                            exec(cells[step], module.__dict__)
+                    run.assert_not_called()
+                    session.assert_not_called()
+
+    def test_steps_without_environment_explain_how_to_recover(self):
+        for entry in ["lrc", "srt"]:
+            with self.subTest(entry=entry), notebook_session(entry, prepare=False) as (cells, module, _):
+                for step in ["transcribe", "translate"]:
+                    with self.assertRaisesRegex(RuntimeError, "Step 2"):
+                        exec(cells[step], module.__dict__)
+
+    def test_translation_without_transcript_never_runs_whisper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = Path(folder) / "podcast.mp3"
+            audio.touch()
+            for entry in ["lrc", "srt"]:
+                with self.subTest(entry=entry), notebook_session(entry, audio) as (cells, module, _):
+                    with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                        with self.assertRaisesRegex(RuntimeError, "Step 3"):
+                            exec(cells["translate"], module.__dict__)
+                    run.assert_not_called()
+                    session.assert_not_called()
+                    self.assertFalse(audio.with_suffix(".lrc").exists())
+
+    def test_disabled_saving_uses_memory_only_in_current_runtime(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = Path(folder) / "podcast.mp3"
+            audio.touch()
+            with notebook_session("lrc", audio) as (cells, module, _):
+                module.SAVE_PROGRESS = False
+                module.OUTPUT_CHINESE = False
+                with patch.object(subprocess, "run", side_effect=fake_whisper):
+                    exec(cells["transcribe"], module.__dict__)
+                with patch.object(subprocess, "run") as run:
+                    exec(cells["translate"], module.__dict__)
+                    run.assert_not_called()
+                self.assertTrue(audio.with_suffix(".lrc").is_file())
+                self.assertFalse(list(audio.parent.glob("*.json")))
+                module.WHISPER_MODEL = "tiny"
+                with self.assertRaisesRegex(RuntimeError, "Step 3"):
+                    exec(cells["translate"], module.__dict__)
+            with notebook_session("lrc", audio) as (cells, module, _):
+                module.SAVE_PROGRESS = False
+                with patch.object(subprocess, "run") as run:
+                    with self.assertRaisesRegex(RuntimeError, "Step 3"):
+                        exec(cells["translate"], module.__dict__)
+                    run.assert_not_called()
+
+    def test_changed_model_does_not_load_old_transcript(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = Path(folder) / "podcast.mp3"
+            audio.touch()
+            with notebook_session("lrc", audio) as (cells, module, _):
+                with patch.object(subprocess, "run", side_effect=fake_whisper):
+                    exec(cells["transcribe"], module.__dict__)
+                module.WHISPER_MODEL = "tiny"
+                with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                    with self.assertRaisesRegex(RuntimeError, "Step 3"):
+                        exec(cells["translate"], module.__dict__)
                     run.assert_not_called()
                     session.assert_not_called()
 
@@ -413,8 +483,10 @@ class NotebookTests(unittest.TestCase):
                     namespace["OUTPUT_CHINESE"] = False
                     with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
                         with patch.object(requests, "Session") as session:
-                            exec(cells["run"], namespace)
-                            exec(cells["run"], namespace)
+                            exec(cells["transcribe"], namespace)
+                            exec(cells["translate"], namespace)
+                            exec(cells["transcribe"], namespace)
+                            exec(cells["translate"], namespace)
                             session.assert_not_called()
                         run.assert_called_once()
                     output_path = audio.with_suffix("." + subtitle_format)
@@ -425,7 +497,10 @@ class NotebookTests(unittest.TestCase):
                         subprocess, "run", side_effect=subprocess.CalledProcessError(1, "whisper")
                     ):
                         with self.assertRaises(subprocess.CalledProcessError):
-                            exec(cells["run"], namespace)
+                            exec(cells["transcribe"], namespace)
+                        self.assertIsNone(namespace["transcription"])
+                        with self.assertRaisesRegex(RuntimeError, "Step 3"):
+                            exec(cells["translate"], namespace)
                     self.assertEqual(output_path.read_bytes(), saved)
 
     def test_changed_filename_uses_new_configuration(self):
@@ -437,9 +512,13 @@ class NotebookTests(unittest.TestCase):
             with notebook_session("lrc", first) as (cells, module, _):
                 module.OUTPUT_CHINESE = False
                 with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
-                    exec(cells["run"], module.__dict__)
+                    exec(cells["transcribe"], module.__dict__)
+                    exec(cells["translate"], module.__dict__)
                     module.AUDIO_FILENAME = second.name
-                    exec(cells["run"], module.__dict__)
+                    with self.assertRaisesRegex(RuntimeError, "Step 3"):
+                        exec(cells["translate"], module.__dict__)
+                    exec(cells["transcribe"], module.__dict__)
+                    exec(cells["translate"], module.__dict__)
                 self.assertEqual(run.call_count, 2)
                 self.assertEqual(module.output_path, second.with_suffix(".lrc").resolve())
                 self.assertTrue(first.with_suffix(".lrc").is_file())
@@ -457,10 +536,11 @@ class NotebookTests(unittest.TestCase):
                         patch.object(subprocess, "run", side_effect=fake_whisper) as transcribe,
                         patch.object(requests, "Session", return_value=session) as sessions,
                     ):
-                        exec(cells["run"], module.__dict__)
+                        exec(cells["transcribe"], module.__dict__)
+                        exec(cells["translate"], module.__dict__)
                         self.assertEqual(module.output_path.suffix, ".lrc")
                         module.OUTPUT_FORMAT = "srt"
-                        exec(cells["run"], module.__dict__)
+                        exec(cells["translate"], module.__dict__)
                     transcribe.assert_called_once()
                     sessions.assert_called_once()
                     self.assertEqual(session.post.call_count, 2)
@@ -476,7 +556,7 @@ class NotebookTests(unittest.TestCase):
                     module.OUTPUT_FORMAT = invalid
                     with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
                         with self.assertRaisesRegex(ValueError, "OUTPUT_FORMAT"):
-                            exec(cells["run"], module.__dict__)
+                            exec(cells["translate"], module.__dict__)
                         run.assert_not_called()
                         session.assert_not_called()
 
@@ -516,11 +596,14 @@ class NotebookTests(unittest.TestCase):
                             patch.object(requests, "Session", return_value=session),
                             patch.object(Path, "replace", replace),
                         ):
+                            exec(cells["transcribe"], module.__dict__)
+                            runtime.unassign.assert_not_called()
+                            session.post.assert_not_called()
                             if outcome in {"api_error", "save_error"}:
                                 with self.assertRaises(RuntimeError if outcome == "api_error" else OSError):
-                                    exec(cells["run"], module.__dict__)
+                                    exec(cells["translate"], module.__dict__)
                             else:
-                                exec(cells["run"], module.__dict__)
+                                exec(cells["translate"], module.__dict__)
                         self.assertEqual(runtime.unassign.call_count, int(outcome == "complete"))
 
 

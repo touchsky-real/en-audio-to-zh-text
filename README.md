@@ -2,9 +2,7 @@
 
 > "我想听英文播客的时候发现，这些播客都没有中文字幕，于是就有了这个项目。"
 
-**LRC / SRT 字幕** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb)
-
-默认输出 LRC；在 Step 1 修改 `OUTPUT_FORMAT` 即可切换为 SRT。
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb)
 
 ## 📖 项目介绍
 
@@ -40,9 +38,11 @@
 1.  点击上方的 **"Open in Colab"** 按钮打开笔记本。
 2.  **连接运行时**：点击右上角 "连接"，建议选择 T4 GPU 环境。
 3.  **先填写必要参数**：打开笔记本后，第一个代码块就是 **[Step 1] 配置参数**。按照下方说明填写文件名、确认目录和翻译接口；可选参数一般保持默认。
-4.  **依次运行三个代码块**：**Step 1 配置参数 → Step 2 准备环境 → Step 3 开始处理**。API Key 留空时，Step 1 会提示隐藏输入；Step 2 会请求挂载 Google Drive。
+4.  **依次运行四个代码块**：**Step 1 配置参数 → Step 2 准备环境 → Step 3 转录音频 → Step 4 翻译与保存**。API Key 留空时，Step 1 会提示隐藏输入；Step 2 会请求挂载 Google Drive。
 
-生成的 `.lrc` 或 `.srt` 文件会保存到音频所在目录。默认开启进度保存，补译时只需重新运行 **Step 3**，已成功的片段不会重复翻译。修改参数后，重新运行 **Step 1、Step 3**；重启运行时后则需依次运行三步。
+生成的 `.lrc` 或 `.srt` 文件会保存到音频所在目录。默认开启进度保存，补译时只需重新运行 **Step 4**，已成功的片段不会重复翻译。修改翻译参数或格式后，重新运行 **Step 1、Step 4**；修改音频或转录模型后，需要先执行 **Step 3**。
+
+若想节省 GPU 使用时长，等 Step 3 完成后再切换为 CPU 运行时，然后运行 **Step 1、2、4**。保持 `SAVE_PROGRESS = True` 时，Step 4 会恢复 Drive 中的转录结果，不会重新转录；找不到匹配结果时会提示先运行 Step 3。
 
 ### 必要参数：先填写或确认这几项
 
@@ -73,13 +73,13 @@ OUTPUT_FORMAT = "lrc"  # 默认：生成 example.lrc
 # 改为 "srt"：生成 example.srt 和英文版 example_en.srt
 ```
 
-格式只接受小写 `"lrc"` 或 `"srt"`。切换后重新运行 Step 1、Step 3；保持 `SAVE_PROGRESS = True` 时，会复用已有转录和成功的翻译。
+格式只接受小写 `"lrc"` 或 `"srt"`。切换后重新运行 Step 1、Step 4；保持 `SAVE_PROGRESS = True` 时，会复用已有转录和成功的翻译。
 
 | 参数 | 默认值 | 作用 |
 | --- | --- | --- |
 | `OUTPUT_FORMAT` | `"lrc"` | 输出格式；`"lrc"` 生成歌词，`"srt"` 生成字幕。 |
 | `OUTPUT_CHINESE` | `True` | 输出中英双语；`False` 仅输出英文，不调用翻译 API。 |
-| `SAVE_PROGRESS` | `True` | 保存并恢复转录、成功的翻译；`False` 不读写进度文件，每次重新处理，已有进度文件保留。 |
+| `SAVE_PROGRESS` | `True` | 保存并恢复转录、成功的翻译；`False` 不读写进度文件，当前会话仍可用转录结果翻译，重启后需重新转录，已有进度文件保留。 |
 | `AUTO_DISCONNECT` | `False` | 设为 `True` 后，转录、翻译及字幕保存全部成功才自动断开 Colab。 |
 | `MAX_WORKERS` | `5` | 翻译并发数；遇到接口限流时可适当调低，例如 `1`。 |
 | `MAX_RETRIES` | `2` | 首次请求失败后的额外重试次数；`0` 表示不重试。 |

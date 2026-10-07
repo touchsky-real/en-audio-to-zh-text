@@ -34,8 +34,8 @@ def build_notebook(notebook_name):
             "metadata": {"id": "intro"},
             "source": [
                 "# 英文音频 → 中英双语字幕（LRC / SRT）\n",
-                "先填写下方必要参数，再依次运行：**1. 配置参数 → 2. 准备环境 → 3. 开始处理**。建议选择 GPU 运行时。\n",
-                "字幕保存到音频所在目录。默认保存进度，补译时只需重跑 Step 3；重启运行时后依次运行三步。\n",
+                "先填写下方必要参数，再依次运行：**1. 配置参数 → 2. 准备环境 → 3. 转录 → 4. 翻译与保存**。建议选择 GPU 运行时。\n",
+                "字幕保存到音频所在目录。默认保存进度，补译时只需重跑 Step 4；有已保存转录时，重启后运行 Step 1、2、4 即可。\n",
                 '默认生成 LRC 歌词；在 Step 1 设置 `OUTPUT_FORMAT = "srt"` 可生成 SRT 字幕。\n',
                 "设置 `OUTPUT_CHINESE = False` 仅输出英文；`SAVE_PROGRESS = False` 关闭进度保存与恢复。\n",
             ],
@@ -72,11 +72,13 @@ def build_notebook(notebook_name):
     """,
         )
     )
+    core = (ROOT / "audio2text.py").read_text(encoding="utf-8")
     cells.append(
         code_cell(
             "setup",
-            f"""
-        # [Step 2] 安装依赖并挂载 Google Drive（直接运行，无需修改）
+            dedent(f"""
+        # [Step 2] 准备环境并加载处理函数（直接运行，无需修改）
+        _helpers_ready = False
         import shutil
         import subprocess
         import sys
@@ -90,45 +92,86 @@ def build_notebook(notebook_name):
             subprocess.run(["apt-get", "update", "-qq"], check=True)
             subprocess.run(["apt-get", "install", "-y", "-qq", "ffmpeg"], check=True)
         drive.mount("/content/drive")
-        print("环境准备完成。")
-    """,
+    """)
+            + core
+            + '\n_helpers_ready = True\nprint("环境准备完成。")\n',
         )
     )
-    core = (ROOT / "audio2text.py").read_text(encoding="utf-8")
-    pipeline = dedent(
-        """
-        def run_task():
+    cells.append(
+        code_cell(
+            "transcribe",
+            """
+        # [Step 3] 转录音频（完成后再运行 Step 4，或切换到 CPU 运行时）
+        transcription = None  # 新任务失败时不能误用上次结果
+
+        def run_transcription():
             import time
 
+            if not globals().get("_helpers_ready", False):
+                raise RuntimeError("请先成功运行 Step 2 准备环境。")
+            required = ("DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "SAVE_PROGRESS")
+            if any(name not in globals() for name in required):
+                raise RuntimeError("请先运行 Step 1 配置参数。")
+            source = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
+            started = time.monotonic()
+            segments = transcribe_audio(source, model=WHISPER_MODEL, save_progress=SAVE_PROGRESS)
+            print(f"转录完成：{len(segments)} 个片段，耗时 {time.monotonic() - started:.1f} 秒。")
+            if SAVE_PROGRESS:
+                print("转录进度已保存。可直接运行 Step 4，或切换 CPU 后运行 Step 1、2、4。")
+            else:
+                print("进度保存已关闭，请在当前运行时执行 Step 4；重启后需要重新转录。")
+            if not any(segment["text"] for segment in segments):
+                print("未识别到有效文本，请检查音频内容。")
+            return {"path": source, "audio": _audio_identity(source), "model": WHISPER_MODEL,
+                    "segments": segments}
+
+        transcription = run_transcription()
+        """,
+        )
+    )
+    cells.append(
+        code_cell(
+            "translate",
+            """
+        # [Step 4] 翻译并保存字幕（只补失败片段，不执行转录）
+        def run_translation():
+            import time
+
+            if not globals().get("_helpers_ready", False):
+                raise RuntimeError("请先成功运行 Step 2 准备环境。")
             required = (
                 "DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "OUTPUT_CHINESE",
                 "API_KEY", "BASE_URL", "MODEL_NAME", "MAX_WORKERS", "MAX_RETRIES",
                 "REQUEST_TIMEOUT", "SAVE_PROGRESS", "AUTO_DISCONNECT", "OUTPUT_FORMAT",
             )
             if any(name not in globals() for name in required):
-                raise RuntimeError("请先运行 Step 1 配置参数；重启运行时后请依次运行三步。")
+                raise RuntimeError("请先运行 Step 1 配置参数。")
             if OUTPUT_FORMAT not in ("lrc", "srt"):
                 raise ValueError('OUTPUT_FORMAT 只能填写 "lrc" 或 "srt"。请修改 Step 1 后重新运行。')
-            source_path = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
+            source = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
+            previous = globals().get("transcription")
+            segments = None
+            if (previous and previous["path"] == source
+                    and previous["audio"] == _audio_identity(source) and previous["model"] == WHISPER_MODEL):
+                segments = previous["segments"]
+            elif SAVE_PROGRESS:
+                segments = load_transcript(source, model=WHISPER_MODEL)
+            if segments is None:
+                raise RuntimeError("找不到当前音频和模型对应的转录结果，请先成功运行 Step 3。")
             translation_config = None
             if OUTPUT_CHINESE:
                 translation_config = TranslationConfig(
                     api_key=API_KEY, base_url=BASE_URL, model=MODEL_NAME,
                     max_workers=MAX_WORKERS, max_retries=MAX_RETRIES, timeout=REQUEST_TIMEOUT,
                 )
-            started = time.monotonic()
-            print("正在准备转录（有匹配的进度时自动恢复）...")
-            segments = transcribe_audio(source_path, model=WHISPER_MODEL, save_progress=SAVE_PROGRESS)
-            print(f"转录已就绪：{len(segments)} 个片段。")
-            if not any(segment["text"] for segment in segments):
-                print("未识别到有效文本，请检查音频内容。")
 
             def show_progress(finished, total):
                 if finished % 20 == 0 or finished == total:
                     print(f"本轮翻译进度：{finished}/{total}")
 
+            started = time.monotonic()
             output_path, result = export_subtitles(
-                source_path, segments, subtitle_format=OUTPUT_FORMAT,
+                source, segments, subtitle_format=OUTPUT_FORMAT,
                 config=translation_config, output_chinese=OUTPUT_CHINESE,
                 progress=show_progress, save_progress=SAVE_PROGRESS,
             )
@@ -138,11 +181,11 @@ def build_notebook(notebook_name):
             else:
                 print("已导出英文字幕，未调用翻译 API。")
             if not SAVE_PROGRESS:
-                print("进度保存已关闭，再次运行将重新处理全部内容。")
+                print("进度保存已关闭，再次运行 Step 4 将重新翻译全部片段。")
             if result.failed_indices:
                 print(f"仍有 {len(result.failed_indices)} 条翻译失败，已保留英文。")
                 if SAVE_PROGRESS:
-                    print("检查接口后重跑 Step 3，即可继续补译。")
+                    print("检查接口后重跑 Step 4，即可继续补译。")
             elif AUTO_DISCONNECT:
                 from google.colab import runtime
                 print("字幕已完整保存，5 秒后断开运行时。")
@@ -150,13 +193,8 @@ def build_notebook(notebook_name):
                 runtime.unassign()
             return output_path, result
 
-        output_path, result = run_task()
-        """
-    )
-    cells.append(
-        code_cell(
-            "run",
-            "# [Step 3] 开始处理 / 继续补译（直接运行，无需修改）\n" + core + pipeline,
+        output_path, result = run_translation()
+        """,
         )
     )
     return {

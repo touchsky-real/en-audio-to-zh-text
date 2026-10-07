@@ -118,6 +118,15 @@ def _read_progress(path):
     return data
 
 
+def load_transcript(audio_path, model="turbo"):
+    """Read a matching saved transcript without loading or running Whisper."""
+    source = Path(audio_path).resolve(strict=True)
+    cached = _read_progress(source.with_name(source.name + ".transcript.json"))
+    if cached and cached.get("audio") == _audio_identity(source) and cached.get("model") == model:
+        return validate_segments(cached)
+    return None
+
+
 def transcribe_audio(audio_path, model="turbo", *, save_progress=True):
     """Run Whisper in an isolated directory and only read a successful run's JSON."""
     source = Path(audio_path).resolve(strict=True)
@@ -125,9 +134,9 @@ def transcribe_audio(audio_path, model="turbo", *, save_progress=True):
         raise ValueError(f"不是音频文件：{source}")
     identity = _audio_identity(source)
     cache_path = source.with_name(source.name + ".transcript.json")
-    cached = _read_progress(cache_path) if save_progress else None
-    if cached and cached.get("audio") == identity and cached.get("model") == model:
-        return validate_segments(cached)
+    cached = load_transcript(source, model) if save_progress else None
+    if cached is not None:
+        return cached
     with tempfile.TemporaryDirectory(prefix="audio2text-") as folder:
         workdir = Path(folder)
         local_audio = workdir / ("audio" + source.suffix)
