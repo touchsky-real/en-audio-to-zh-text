@@ -24,7 +24,7 @@ class TranslationConfig:
     api_key: str = field(repr=False)
     base_url: str
     model: str
-    max_workers: int = 5
+    max_workers: int = 3
     max_retries: int = 2
     timeout: float = 30
     retry_delay: float = 1

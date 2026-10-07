@@ -61,7 +61,7 @@ def build_notebook(notebook_name):
         OUTPUT_CHINESE = True  # False：仅输出英文，不需要翻译接口
         SAVE_PROGRESS = True  # 保存并恢复进度；False：不读写进度文件，每次重新处理
         AUTO_DISCONNECT = False  # True：仅在全部成功保存后自动断开
-        MAX_WORKERS = 5
+        MAX_WORKERS = 3
         MAX_RETRIES = 2  # 首次请求失败后的额外尝试次数；0 表示不重试
         REQUEST_TIMEOUT = 30  # 每次翻译请求的超时秒数
         WHISPER_MODEL = "turbo"
