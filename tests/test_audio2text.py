@@ -32,6 +32,8 @@ def config(**overrides):
         max_workers=1,
         max_retries=2,
         retry_delay=0,
+        batch_size=1,
+        requests_per_minute=0,
     )
     values.update(overrides)
     return app.TranslationConfig(**values)
@@ -49,6 +51,30 @@ def response(content="你好", *, status=200, payload=None, headers=None):
     result.__enter__ = Mock(return_value=result)
     result.__exit__ = Mock(return_value=False)
     return result
+
+
+class FakeClock:
+    """Advance timed waits without delaying tests or changing thread startup."""
+
+    def __init__(self):
+        self.now = 100.0
+        self.waits = []
+        self.original_wait = threading.Event.wait
+
+    def wait(self, event, timeout=None):
+        if timeout is None:
+            return self.original_wait(event)
+        self.waits.append(timeout)
+        self.now += timeout
+        return event.is_set()
+
+    @contextlib.contextmanager
+    def installed(self):
+        with (
+            patch.object(app.time, "monotonic", side_effect=lambda: self.now),
+            patch.object(threading.Event, "wait", autospec=True, side_effect=self.wait),
+        ):
+            yield self
 
 
 def fake_process(output=b"", return_code=0):
@@ -252,6 +278,14 @@ class TranslationTests(unittest.TestCase):
             {"timeout": 0},
             {"timeout": float("nan")},
             {"retry_delay": -1},
+            {"batch_size": 0},
+            {"batch_size": True},
+            {"batch_size": 1.5},
+            {"batch_max_chars": 0},
+            {"batch_max_chars": True},
+            {"requests_per_minute": -1},
+            {"requests_per_minute": float("nan")},
+            {"requests_per_minute": float("inf")},
         ]:
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 config(**overrides)
@@ -325,21 +359,15 @@ class TranslationTests(unittest.TestCase):
     def test_server_error_honors_retry_after(self):
         session = Mock()
         session.post.side_effect = [response(status=503, headers={"Retry-After": "2"}), response()]
-        original_wait = threading.Event.wait
+        clock = FakeClock()
+        with patch.object(app.requests, "Session", return_value=session), clock.installed():
+            app.translate_segments(SEGMENTS[:1], config())
+        self.assertIn(2, clock.waits)
 
-        def wait_without_delay(event, timeout=None):
-            # Preserve ThreadPoolExecutor's thread-start synchronization.
-            return original_wait(event) if timeout is None else False
-
-        with patch.object(app.requests, "Session", return_value=session):
-            with patch.object(threading.Event, "wait", autospec=True, side_effect=wait_without_delay) as wait:
-                app.translate_segments(SEGMENTS[:1], config())
-        self.assertTrue(any(call.args[1:] == (2,) for call in wait.call_args_list))
-
-    def test_retry_after_is_bounded_and_handles_invalid_values(self):
+    def test_retry_after_honors_long_delays_and_handles_invalid_values(self):
         for value, expected in [
             ("3", 3),
-            ("999", 60),
+            ("999", 999),
             ("-4", 0),
             ("invalid", 0),
             ("nan", 0),
@@ -385,6 +413,9 @@ def notebook_session(subtitle_format, audio_path=None, *, configure=True, prepar
                 AUDIO_FILENAME=audio_path.name,
                 MAX_WORKERS=1,
                 MAX_RETRIES=0,
+                BATCH_SIZE=1,
+                REQUESTS_PER_MINUTE=0,
+                RETRY_DELAY=0,
             )
         if prepare:
             colab = types.ModuleType("google.colab")

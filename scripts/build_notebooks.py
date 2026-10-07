@@ -62,7 +62,11 @@ def build_notebook(notebook_name):
         SAVE_PROGRESS = True  # 保存并恢复进度；False：不读写进度文件，每次重新处理
         AUTO_DISCONNECT = False  # True：仅在全部成功保存后自动断开
         MAX_WORKERS = 3
+        BATCH_SIZE = 15  # 每次合并的字幕条数，建议 10~20；1 表示逐条翻译
+        BATCH_MAX_CHARS = 6000  # 每批原文字符上限；单条超长字幕会单独发送
+        REQUESTS_PER_MINUTE = 60  # 所有线程共用的请求上限，按服务商配额调整；0 关闭主动限速
         MAX_RETRIES = 2  # 首次请求失败后的额外尝试次数；0 表示不重试
+        RETRY_DELAY = 1  # 指数退避的初始秒数，带随机抖动；限流时自动延长等待
         REQUEST_TIMEOUT = 30  # 每次翻译请求的超时秒数
         WHISPER_MODEL = "turbo"
 
@@ -143,6 +147,7 @@ def build_notebook(notebook_name):
                 "DRIVE_FOLDER", "AUDIO_FILENAME", "WHISPER_MODEL", "OUTPUT_CHINESE",
                 "API_KEY", "BASE_URL", "MODEL_NAME", "MAX_WORKERS", "MAX_RETRIES",
                 "REQUEST_TIMEOUT", "SAVE_PROGRESS", "AUTO_DISCONNECT", "OUTPUT_FORMAT",
+                "BATCH_SIZE", "BATCH_MAX_CHARS", "REQUESTS_PER_MINUTE", "RETRY_DELAY",
             )
             if any(name not in globals() for name in required):
                 raise RuntimeError("请先运行 Step 1 配置参数。")
@@ -163,7 +168,13 @@ def build_notebook(notebook_name):
                 translation_config = TranslationConfig(
                     api_key=API_KEY, base_url=BASE_URL, model=MODEL_NAME,
                     max_workers=MAX_WORKERS, max_retries=MAX_RETRIES, timeout=REQUEST_TIMEOUT,
+                    batch_size=BATCH_SIZE, batch_max_chars=BATCH_MAX_CHARS,
+                    requests_per_minute=REQUESTS_PER_MINUTE, retry_delay=RETRY_DELAY,
                 )
+                print(f"批量翻译：每批最多 {BATCH_SIZE} 条、{BATCH_MAX_CHARS} 字符。")
+                if REQUESTS_PER_MINUTE:
+                    print(f"请求限速：所有线程合计每分钟最多 {REQUESTS_PER_MINUTE:g} 次。")
+                print("遇到限流会自动退避并降低发送频率，成功后逐步恢复。")
 
             failure_counts = {}
 
