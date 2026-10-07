@@ -51,12 +51,22 @@ def response(content="你好", *, status=200, payload=None, headers=None):
     return result
 
 
-def fake_whisper(command, *, check):
-    if not check:
-        raise AssertionError("Whisper failures must propagate")
+def fake_process(output=b"", return_code=0):
+    process = Mock()
+    process.stdout = io.BytesIO(output)
+    process.wait.return_value = return_code
+    process.poll.return_value = return_code
+    process.__enter__ = Mock(return_value=process)
+    process.__exit__ = Mock(return_value=False)
+    return process
+
+
+def fake_whisper(command, **kwargs):
+    if kwargs.get("stdout") != subprocess.PIPE or kwargs.get("stderr") != subprocess.STDOUT:
+        raise AssertionError("Whisper progress must be captured for streaming")
     workdir = Path(command[command.index("--output_dir") + 1])
     (workdir / "audio.json").write_text(json.dumps({"segments": SEGMENTS}), encoding="utf-8")
-    return subprocess.CompletedProcess(command, 0)
+    return fake_process(b"\r100%|##########| 100/100 [00:01<00:00, 100frames/s]\n")
 
 
 class SubtitleTests(unittest.TestCase):
@@ -138,14 +148,15 @@ class FileTests(unittest.TestCase):
             source.write_bytes(b"audio")
             stale = Path(folder) / "audio.json"
             stale.write_text("stale", encoding="utf-8")
-            with patch.object(app.subprocess, "run", side_effect=fake_whisper) as run:
+            with patch.object(app.subprocess, "Popen", side_effect=fake_whisper) as run:
                 result = app.transcribe_audio(source)
             self.assertEqual(result, app.validate_segments({"segments": SEGMENTS}))
             command = run.call_args.args[0]
+            local_audio = Path(command[command.index("whisper") + 1])
             self.assertIsInstance(command, list)
             self.assertNotIn("shell", run.call_args.kwargs)
-            self.assertNotEqual(Path(command[3]).parent, source.parent)
-            self.assertFalse(Path(command[3]).exists())
+            self.assertNotEqual(local_audio.parent, source.parent)
+            self.assertFalse(local_audio.exists())
             self.assertEqual(source.read_bytes(), b"audio")
             self.assertEqual(stale.read_text(), "stale")
 
@@ -154,7 +165,9 @@ class FileTests(unittest.TestCase):
             source = Path(folder) / "podcast.mp3"
             source.write_bytes(b"audio")
             source.with_suffix(".json").write_text(json.dumps({"segments": SEGMENTS}))
-            with patch.object(app.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "whisper")):
+            with patch.object(
+                app.subprocess, "Popen", side_effect=subprocess.CalledProcessError(1, "whisper")
+            ):
                 with self.assertRaises(subprocess.CalledProcessError):
                     app.transcribe_audio(source)
 
@@ -162,7 +175,7 @@ class FileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "podcast.mp3"
             source.touch()
-            with patch.object(app.subprocess, "run"):
+            with patch.object(app.subprocess, "Popen", return_value=fake_process()):
                 with self.assertRaises(FileNotFoundError):
                     app.transcribe_audio(source)
 
@@ -406,7 +419,7 @@ class NotebookTests(unittest.TestCase):
                 self.subTest(format=subtitle_format),
                 notebook_session(subtitle_format, configure=False) as (cells, module, _),
             ):
-                with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                with patch.object(subprocess, "Popen") as run, patch.object(requests, "Session") as session:
                     for step in ["transcribe", "translate"]:
                         with self.assertRaisesRegex(RuntimeError, "请先运行 Step 1"):
                             exec(cells[step], module.__dict__)
@@ -426,7 +439,10 @@ class NotebookTests(unittest.TestCase):
             audio.touch()
             for entry in ["lrc", "srt"]:
                 with self.subTest(entry=entry), notebook_session(entry, audio) as (cells, module, _):
-                    with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                    with (
+                        patch.object(subprocess, "Popen") as run,
+                        patch.object(requests, "Session") as session,
+                    ):
                         with self.assertRaisesRegex(RuntimeError, "Step 3"):
                             exec(cells["translate"], module.__dict__)
                     run.assert_not_called()
@@ -440,9 +456,9 @@ class NotebookTests(unittest.TestCase):
             with notebook_session("lrc", audio) as (cells, module, _):
                 module.SAVE_PROGRESS = False
                 module.OUTPUT_CHINESE = False
-                with patch.object(subprocess, "run", side_effect=fake_whisper):
+                with patch.object(subprocess, "Popen", side_effect=fake_whisper):
                     exec(cells["transcribe"], module.__dict__)
-                with patch.object(subprocess, "run") as run:
+                with patch.object(subprocess, "Popen") as run:
                     exec(cells["translate"], module.__dict__)
                     run.assert_not_called()
                 self.assertTrue(audio.with_suffix(".lrc").is_file())
@@ -452,7 +468,7 @@ class NotebookTests(unittest.TestCase):
                     exec(cells["translate"], module.__dict__)
             with notebook_session("lrc", audio) as (cells, module, _):
                 module.SAVE_PROGRESS = False
-                with patch.object(subprocess, "run") as run:
+                with patch.object(subprocess, "Popen") as run:
                     with self.assertRaisesRegex(RuntimeError, "Step 3"):
                         exec(cells["translate"], module.__dict__)
                     run.assert_not_called()
@@ -462,10 +478,10 @@ class NotebookTests(unittest.TestCase):
             audio = Path(folder) / "podcast.mp3"
             audio.touch()
             with notebook_session("lrc", audio) as (cells, module, _):
-                with patch.object(subprocess, "run", side_effect=fake_whisper):
+                with patch.object(subprocess, "Popen", side_effect=fake_whisper):
                     exec(cells["transcribe"], module.__dict__)
                 module.WHISPER_MODEL = "tiny"
-                with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                with patch.object(subprocess, "Popen") as run, patch.object(requests, "Session") as session:
                     with self.assertRaisesRegex(RuntimeError, "Step 3"):
                         exec(cells["translate"], module.__dict__)
                     run.assert_not_called()
@@ -481,7 +497,7 @@ class NotebookTests(unittest.TestCase):
                     self.assertIs(namespace["SAVE_PROGRESS"], True)
                     namespace["OUTPUT_FORMAT"] = subtitle_format
                     namespace["OUTPUT_CHINESE"] = False
-                    with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
+                    with patch.object(subprocess, "Popen", side_effect=fake_whisper) as run:
                         with patch.object(requests, "Session") as session:
                             exec(cells["transcribe"], namespace)
                             exec(cells["translate"], namespace)
@@ -511,7 +527,7 @@ class NotebookTests(unittest.TestCase):
             second.touch()
             with notebook_session("lrc", first) as (cells, module, _):
                 module.OUTPUT_CHINESE = False
-                with patch.object(subprocess, "run", side_effect=fake_whisper) as run:
+                with patch.object(subprocess, "Popen", side_effect=fake_whisper) as run:
                     exec(cells["transcribe"], module.__dict__)
                     exec(cells["translate"], module.__dict__)
                     module.AUDIO_FILENAME = second.name
@@ -533,7 +549,7 @@ class NotebookTests(unittest.TestCase):
                     session = Mock()
                     session.post.return_value = response()
                     with (
-                        patch.object(subprocess, "run", side_effect=fake_whisper) as transcribe,
+                        patch.object(subprocess, "Popen", side_effect=fake_whisper) as transcribe,
                         patch.object(requests, "Session", return_value=session) as sessions,
                     ):
                         exec(cells["transcribe"], module.__dict__)
@@ -554,7 +570,10 @@ class NotebookTests(unittest.TestCase):
             for invalid in ["vtt", "SRT", "", None]:
                 with self.subTest(entry=entry, format=invalid), notebook_session(entry) as (cells, module, _):
                     module.OUTPUT_FORMAT = invalid
-                    with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
+                    with (
+                        patch.object(subprocess, "Popen") as run,
+                        patch.object(requests, "Session") as session,
+                    ):
                         with self.assertRaisesRegex(ValueError, "OUTPUT_FORMAT"):
                             exec(cells["translate"], module.__dict__)
                         run.assert_not_called()
@@ -592,7 +611,7 @@ class NotebookTests(unittest.TestCase):
                         with (
                             patch.dict(sys.modules, {"google.colab": colab}),
                             patch("time.sleep"),
-                            patch.object(subprocess, "run", side_effect=fake_whisper),
+                            patch.object(subprocess, "Popen", side_effect=fake_whisper),
                             patch.object(requests, "Session", return_value=session),
                             patch.object(Path, "replace", replace),
                         ):

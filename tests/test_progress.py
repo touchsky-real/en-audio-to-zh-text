@@ -198,7 +198,7 @@ class ProgressTests(unittest.TestCase):
         factory.assert_not_called()
 
     def test_transcript_is_restored_and_invalidated_on_source_or_model_change(self):
-        with patch.object(app.subprocess, "run", side_effect=fake_whisper) as run:
+        with patch.object(app.subprocess, "Popen", side_effect=fake_whisper) as run:
             first = app.transcribe_audio(self.source)
             second = app.transcribe_audio(self.source)
             self.assertEqual(first, second)
@@ -210,11 +210,11 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(run.call_count, 3)
 
     def test_disabling_progress_does_not_read_or_write_transcript(self):
-        with patch.object(app.subprocess, "run", side_effect=fake_whisper):
+        with patch.object(app.subprocess, "Popen", side_effect=fake_whisper):
             app.transcribe_audio(self.source, save_progress=False)
         self.assertFalse(self.transcript.exists())
         self.transcript.write_text("previous progress", encoding="utf-8")
-        with patch.object(app.subprocess, "run", side_effect=fake_whisper) as run:
+        with patch.object(app.subprocess, "Popen", side_effect=fake_whisper) as run:
             app.transcribe_audio(self.source, save_progress=False)
         run.assert_called_once()
         self.assertEqual(self.transcript.read_text(), "previous progress")
@@ -234,7 +234,7 @@ class ProgressTests(unittest.TestCase):
                         )
                         session.post.return_value = response("再见")
                         with (
-                            patch.object(subprocess, "run", side_effect=fake_whisper) as run,
+                            patch.object(subprocess, "Popen", side_effect=fake_whisper) as run,
                             patch.object(requests, "Session", return_value=session),
                         ):
                             if attempt == 0:

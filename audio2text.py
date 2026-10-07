@@ -1,5 +1,6 @@
 # Shared transcription, translation and subtitle helpers for the Colab notebooks.
 
+import codecs
 import hashlib
 import json
 import math
@@ -127,6 +128,32 @@ def load_transcript(audio_path, model="turbo"):
     return None
 
 
+def _run_whisper(command):
+    """Relay Whisper's live progress to the notebook's captured Python output."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+        try:
+            # read1 forwards available bytes immediately, including tqdm's
+            # carriage-return updates that do not end in a newline.
+            while chunk := process.stdout.read1(4096):
+                print(decoder.decode(chunk), end="", flush=True)
+            print(decoder.decode(b"", final=True), end="", flush=True)
+            return_code = process.wait()
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+        finally:
+            print(flush=True)
+    if return_code:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
 def transcribe_audio(audio_path, model="turbo", *, save_progress=True):
     """Run Whisper in an isolated directory and only read a successful run's JSON."""
     source = Path(audio_path).resolve(strict=True)
@@ -136,14 +163,20 @@ def transcribe_audio(audio_path, model="turbo", *, save_progress=True):
     cache_path = source.with_name(source.name + ".transcript.json")
     cached = load_transcript(source, model) if save_progress else None
     if cached is not None:
+        print("已恢复已完成的转录，跳过音频识别。", flush=True)
         return cached
     with tempfile.TemporaryDirectory(prefix="audio2text-") as folder:
         workdir = Path(folder)
         local_audio = workdir / ("audio" + source.suffix)
+        print("正在复制音频到本地...", flush=True)
         shutil.copy2(source, local_audio)
-        subprocess.run(
+        print("正在加载 Whisper 模型并准备音频；开始识别后会显示进度条。", flush=True)
+        _run_whisper(
             [
                 sys.executable,
+                "-X",
+                "utf8",
+                "-u",
                 "-m",
                 "whisper",
                 str(local_audio),
@@ -157,8 +190,7 @@ def transcribe_audio(audio_path, model="turbo", *, save_progress=True):
                 str(workdir),
                 "--verbose",
                 "False",
-            ],
-            check=True,
+            ]
         )
         with (workdir / "audio.json").open(encoding="utf-8") as stream:
             segments = validate_segments(json.load(stream))
