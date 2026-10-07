@@ -2,7 +2,7 @@
 
 > "我想听英文播客的时候发现，这些播客都没有中文字幕，于是就有了这个项目。"
 
-**LRC 歌词版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb)  **SRT 字幕版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2srt.ipynb)
+**LRC 歌词版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2lrc.ipynb) &emsp;&emsp; **SRT 字幕版** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/touchsky-real/en-audio-to-zh-text/blob/main/audio2srt.ipynb)
 
 
 ## 📖 项目介绍
@@ -38,23 +38,44 @@
 
 1.  点击上方的 **"Open in Colab"** 按钮打开笔记本。
 2.  **连接运行时**：点击右上角 "连接"，建议选择 T4 GPU 环境。
-3.  **配置参数**：
-    找到 **[Step 2]** 代码块，修改以下关键信息：
+3.  **先填写必要参数**：打开笔记本后，第一个代码块就是 **[Step 1] 配置参数**。按照下方说明填写文件名、确认目录和翻译接口；可选参数一般保持默认。
+4.  **依次运行三个代码块**：**Step 1 配置参数 → Step 2 准备环境 → Step 3 开始处理**。API Key 留空时，Step 1 会提示隐藏输入；Step 2 会请求挂载 Google Drive。
 
-    ```python
-    # 1. 原始文件名 (填入 Drive 里真实的文件名，包含空格/问号都没关系)
-    AUDIO_FILENAME = "example.mp3"
+生成的 `.lrc` 或 `.srt` 文件会保存到音频所在目录。默认开启进度保存，补译时只需重新运行 **Step 3**，已成功的片段不会重复翻译。修改参数后，重新运行 **Step 1、Step 3**；重启运行时后则需依次运行三步。
 
-    # 3. API 设置 (请修改)
-    API_KEY = "******************"
-    BASE_URL = "https://**********************/v1"
-    MODEL_NAME = "gpt-4.1-mini"
-    ```
+### 必要参数：先填写或确认这几项
 
-4.  **运行脚本**：
-    点击菜单栏的 **"代码执行程序" -> "全部运行"**，或者依次点击每个单元格左侧的播放按钮。
+| 参数 | 是否需要修改 | 填写说明 |
+| --- | --- | --- |
+| `AUDIO_FILENAME` | **必填** | Drive 中真实的音频文件名，包含扩展名，例如 `example.mp3`；只填文件名，不填目录。 |
+| `DRIVE_FOLDER` | **确认路径** | 音频所在目录，默认 `/content/drive/MyDrive/podcast`；按上方准备说明上传则无需修改。 |
+| `API_KEY` | **输出中文时需要** | 翻译服务商提供的密钥。可留空，运行 Step 1 时按提示隐藏输入。 |
+| `BASE_URL` | **输出中文时确认** | 翻译 API 根地址，例如 `https://api.openai.com/v1`；使用其他服务商时填写其兼容接口地址，不要加 `/chat/completions`。 |
+| `MODEL_NAME` | **输出中文时确认** | 翻译接口支持的模型名称，默认 `gpt-4.1-mini`；必须与所用服务商匹配。 |
 
-等待片刻，生成的 `.lrc` 文件将自动保存回您的 Google Drive `podcast` 文件夹中。
+```python
+AUDIO_FILENAME = "example.mp3"
+DRIVE_FOLDER = "/content/drive/MyDrive/podcast"
+API_KEY = ""  # 留空，运行时按提示输入
+BASE_URL = "https://api.openai.com/v1"
+MODEL_NAME = "gpt-4.1-mini"
+```
+
+如果仅需英文字幕，将下方的 `OUTPUT_CHINESE` 改为 `False`，无需配置翻译接口。笔记本也支持通过 `TRANSLATION_API_KEY`、`TRANSLATION_BASE_URL`、`TRANSLATION_MODEL` 环境变量读取接口配置。
+
+### 可选参数：一般保持默认
+
+| 参数 | 默认值 | 作用 |
+| --- | --- | --- |
+| `OUTPUT_CHINESE` | `True` | 输出中英双语；`False` 仅输出英文，不调用翻译 API。 |
+| `SAVE_PROGRESS` | `True` | 保存并恢复转录、成功的翻译；`False` 不读写进度文件，每次重新处理，已有进度文件保留。 |
+| `AUTO_DISCONNECT` | `False` | 设为 `True` 后，只有字幕全部成功保存才自动断开 Colab。 |
+| `MAX_WORKERS` | `5` | 翻译并发数；遇到接口限流时可适当调低，例如 `1`。 |
+| `MAX_RETRIES` | `2` | 首次请求失败后的额外重试次数；`0` 表示不重试。 |
+| `REQUEST_TIMEOUT` | `30` | 每次翻译请求的超时秒数。 |
+| `WHISPER_MODEL` | `"turbo"` | 音频转录模型，与上面的翻译模型 `MODEL_NAME` 不同。 |
+
+进度恢复及旧字幕导入的详细说明见 [累积翻译与进度恢复](docs/progress.md)。
 
 ---
 

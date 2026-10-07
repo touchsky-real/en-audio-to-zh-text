@@ -383,7 +383,7 @@ class NotebookTests(unittest.TestCase):
             notebook = json.loads(path.read_text(encoding="utf-8"))
             nbformat.validate(notebook)
             code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
-            self.assertEqual([cell["id"] for cell in code_cells], ["setup", "config", "run"])
+            self.assertEqual([cell["id"] for cell in code_cells], ["config", "setup", "run"])
             for cell in code_cells:
                 compile("".join(cell["source"]), str(path) + ":" + cell["id"], "exec")
                 self.assertEqual(cell["outputs"], [])
@@ -396,7 +396,7 @@ class NotebookTests(unittest.TestCase):
                 notebook_session(subtitle_format, configure=False) as (cells, module, _),
             ):
                 with patch.object(subprocess, "run") as run, patch.object(requests, "Session") as session:
-                    with self.assertRaisesRegex(RuntimeError, "请先运行 Step 2"):
+                    with self.assertRaisesRegex(RuntimeError, "请先运行 Step 1"):
                         exec(cells["run"], module.__dict__)
                     run.assert_not_called()
                     session.assert_not_called()

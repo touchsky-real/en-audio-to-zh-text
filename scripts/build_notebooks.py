@@ -35,7 +35,7 @@ def build_notebook(subtitle_format):
             "metadata": {"id": "intro"},
             "source": [
                 f"# 英文音频 → 中英双语 {label}\n",
-                "选择 GPU 运行时，依次运行：**1. 准备环境 → 2. 配置参数 → 3. 开始处理**。\n",
+                "先填写下方必要参数，再依次运行：**1. 配置参数 → 2. 准备环境 → 3. 开始处理**。建议选择 GPU 运行时。\n",
                 "字幕保存到音频所在目录。默认保存进度，补译时只需重跑 Step 3；重启运行时后依次运行三步。\n",
                 "设置 `OUTPUT_CHINESE = False` 仅输出英文；`SAVE_PROGRESS = False` 关闭进度保存与恢复。\n",
             ],
@@ -43,9 +43,39 @@ def build_notebook(subtitle_format):
     ]
     cells.append(
         code_cell(
+            "config",
+            """
+        # [Step 1] 配置参数：先填写或确认下方必要参数
+        import os
+        from getpass import getpass
+
+        # 必要参数：音频文件和目录必须正确；翻译接口仅在输出中文时需要
+        AUDIO_FILENAME = "example.mp3"  # 必填：Drive 中的文件名，包含扩展名
+        DRIVE_FOLDER = "/content/drive/MyDrive/podcast"  # 音频所在目录，按准备说明上传可不改
+        API_KEY = os.environ.get("TRANSLATION_API_KEY", "")  # 留空时运行本步骤会提示隐藏输入
+        BASE_URL = os.environ.get("TRANSLATION_BASE_URL", "https://api.openai.com/v1")  # API 根地址
+        MODEL_NAME = os.environ.get("TRANSLATION_MODEL", "gpt-4.1-mini")  # 接口支持的翻译模型
+
+        # 可选参数：一般保持默认即可
+        OUTPUT_CHINESE = True  # False：仅输出英文，不需要翻译接口
+        SAVE_PROGRESS = True  # 保存并恢复进度；False：不读写进度文件，每次重新处理
+        AUTO_DISCONNECT = False  # True：仅在全部成功保存后自动断开
+        MAX_WORKERS = 5
+        MAX_RETRIES = 2  # 首次请求失败后的额外尝试次数；0 表示不重试
+        REQUEST_TIMEOUT = 30  # 每次翻译请求的超时秒数
+        WHISPER_MODEL = "turbo"
+
+        if OUTPUT_CHINESE and not API_KEY:
+            API_KEY = getpass("请输入翻译 API Key（输入不会显示）：")
+        print(f"配置完成：{AUDIO_FILENAME}")
+    """,
+        )
+    )
+    cells.append(
+        code_cell(
             "setup",
             f"""
-        # [Step 1] 安装依赖并挂载 Google Drive
+        # [Step 2] 安装依赖并挂载 Google Drive（直接运行，无需修改）
         import shutil
         import subprocess
         import sys
@@ -63,33 +93,6 @@ def build_notebook(subtitle_format):
     """,
         )
     )
-    cells.append(
-        code_cell(
-            "config",
-            """
-        # [Step 2] 配置：修改文件名、API 地址和模型
-        import os
-        from getpass import getpass
-
-        AUDIO_FILENAME = "example.mp3"
-        DRIVE_FOLDER = "/content/drive/MyDrive/podcast"
-        OUTPUT_CHINESE = True
-        BASE_URL = os.environ.get("TRANSLATION_BASE_URL", "https://api.openai.com/v1")
-        MODEL_NAME = os.environ.get("TRANSLATION_MODEL", "gpt-4.1-mini")
-        API_KEY = os.environ.get("TRANSLATION_API_KEY", "")
-        MAX_WORKERS = 5
-        MAX_RETRIES = 2  # 首次请求失败后的额外尝试次数；0 表示不重试
-        REQUEST_TIMEOUT = 30
-        WHISPER_MODEL = "turbo"
-        AUTO_DISCONNECT = False  # 仅在全部成功保存后自动断开
-        SAVE_PROGRESS = True  # 保存并恢复转录和翻译；False：不读写进度文件，每次重新处理
-
-        if OUTPUT_CHINESE and not API_KEY:
-            API_KEY = getpass("请输入翻译 API Key（输入不会显示）：")
-        print(f"配置完成：{AUDIO_FILENAME}")
-    """,
-        )
-    )
     core = (ROOT / "audio2text.py").read_text(encoding="utf-8")
     pipeline = dedent(
         f'''
@@ -102,7 +105,7 @@ def build_notebook(subtitle_format):
                 "REQUEST_TIMEOUT", "SAVE_PROGRESS", "AUTO_DISCONNECT",
             )
             if any(name not in globals() for name in required):
-                raise RuntimeError("请先运行 Step 2 配置参数；重启运行时后请依次运行三步。")
+                raise RuntimeError("请先运行 Step 1 配置参数；重启运行时后请依次运行三步。")
             source_path = resolve_audio_path(DRIVE_FOLDER, AUDIO_FILENAME)
             translation_config = None
             if OUTPUT_CHINESE:
